@@ -27,12 +27,37 @@ const json = (route, status, body) => route.fulfill({
 
 /** Install REST mocks; returns captured request logs for assertions. */
 export async function mockApi(page, options = {}) {
-  const calls = { createStream: [], whip: [], whep: [], cover: [], createResponder: options.createResponder };
+  const calls = {
+    createStream: [],
+    whip: [],
+    whep: [],
+    cover: [],
+    turnCredentials: [],
+    createResponder: options.createResponder,
+    turnMode: options.turnMode || 'ok',
+  };
+  const turnMode = options.turnMode || 'ok';
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
     const method = request.method();
+    if (path === '/api/turn-credentials') {
+      calls.turnCredentials.push(request.headers()['authorization'] || '');
+      if (turnMode === 'unavailable') return json(route, 503, { error: 'TURN 未配置' });
+      if (turnMode === 'invalid') return json(route, 200, { urls: [], username: '', credential: '' });
+      if (turnMode === 'network') return route.abort('failed');
+      return json(route, 200, {
+        urls: [
+          'turn:turn.example.test:3478?transport=udp',
+          'turn:turn.example.test:3478?transport=tcp',
+          'stun:turn.example.test:3478',
+        ],
+        username: '1999999999:conglive',
+        credential: 'dGVzdC1jcmVkZW50aWFs',
+        ttl: 3600,
+      });
+    }
     if (path === '/api/capacity') {
       return json(route, 200, {
         cpuCores: 2,
@@ -223,12 +248,20 @@ export const INSTRUMENTATION = `
       audioContexts: 0,
       tracksStopped: 0,
       streams: [],
+      // iceServers passed to every RTCPeerConnection (TURN / STUN assertions).
+      pcConfigs: [],
     };
     window.__e2e = state;
     const trackPCs = new WeakSet();
     const OrigPC = window.RTCPeerConnection;
     if (OrigPC) {
       window.RTCPeerConnection = function (...args) {
+        const config = args[0] || {};
+        try {
+          state.pcConfigs.push(JSON.parse(JSON.stringify(config.iceServers || [])));
+        } catch {
+          state.pcConfigs.push([]);
+        }
         const pc = new OrigPC(...args);
         state.pcCreated += 1;
         const addTrack = pc.addTrack.bind(pc);
@@ -301,6 +334,7 @@ export async function mediaStats(page) {
       pcClosed: state.pcClosed,
       trackPcCreated: state.trackPcCreated,
       trackPcClosed: state.trackPcClosed,
+      pcConfigs: state.pcConfigs,
       gumCalls: state.gumCalls,
       audioContexts: state.audioContexts,
       tracksStopped: state.tracksStopped,

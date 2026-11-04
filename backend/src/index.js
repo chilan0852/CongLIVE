@@ -17,6 +17,7 @@ import { CoverValidationError, coverFilenameFromUrl, saveCoverImage } from './co
 import { createCapacityProvider } from './capacity.js';
 import { createViewerRegistry } from './viewers.js';
 import { createVoiceSignaling, handleVoiceMessage, VOICE_LIMITS } from './voice.js';
+import { computeTurnCredential, turnSettingsFromEnv } from './turn-utils.js';
 
 dotenv.config();
 
@@ -64,6 +65,9 @@ const publicApiScheme = process.env.PUBLIC_API_SCHEME || 'http';
 const publicApiPort = process.env.PUBLIC_API_PORT === undefined ? '3000' : String(process.env.PUBLIC_API_PORT).trim();
 const recordingApiBase = `${publicApiScheme}://${publicHost}${publicApiPort ? `:${publicApiPort}` : ''}/api/recordings`;
 const srsHookSecret = String(process.env.SRS_HOOK_SECRET || '');
+// coturn TURN relay credentials: a missing TURN_SECRET means this deployment
+// has no TURN server and the API tells clients to fall back to STUN.
+const turnSettings = turnSettingsFromEnv(process.env);
 const recordingsRoot = path.resolve(process.env.RECORDINGS_DIR || '/app/recordings');
 // Stream covers are stored outside the database, next to the recordings volume.
 // COVERS_DIR follows the same deployment convention as RECORDINGS_DIR
@@ -209,6 +213,22 @@ async function auth(req, res, next) {
     return res.status(401).json({ error: '登录状态无效或已过期' });
   }
 }
+
+// Short-lived coturn REST credentials for the voice room. The TURN secret never
+// leaves the server: clients get `<expiry>:conglive` plus the HMAC that coturn
+// verifies with `use-auth-secret`. Without TURN_SECRET the relay is not
+// deployed, so answer 503 and let clients fall back to STUN.
+app.get('/api/turn-credentials', auth, (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!turnSettings.secret) {
+    return res.status(503).json({ error: 'TURN 中继未配置，已回退 STUN 直连' });
+  }
+  const { username, credential, ttl } = computeTurnCredential({
+    secret: turnSettings.secret,
+    ttl: turnSettings.ttl,
+  });
+  return res.json({ urls: turnSettings.urls, username, credential, ttl });
+});
 
 function adminAuth(req, res, next) {
   try {

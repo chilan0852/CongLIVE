@@ -86,12 +86,14 @@ MYSQL_PASSWORD="$(get_env MYSQL_PASSWORD)"
 JWT_SECRET="$(get_env JWT_SECRET)"
 ADMIN_PASSWORD="$(get_env ADMIN_PASSWORD)"
 SRS_HOOK_SECRET="$(get_env SRS_HOOK_SECRET)"
+TURN_SECRET="$(get_env TURN_SECRET)"
 CANDIDATE="${CANDIDATE:-$(get_env CANDIDATE)}"
 [[ -n "$MYSQL_ROOT_PASSWORD" && "$MYSQL_ROOT_PASSWORD" != change_this_root_password ]] || MYSQL_ROOT_PASSWORD="$(random_secret)"
 [[ -n "$MYSQL_PASSWORD" && "$MYSQL_PASSWORD" != change_this_db_password ]] || MYSQL_PASSWORD="$(random_secret)"
 [[ -n "$JWT_SECRET" && "$JWT_SECRET" != replace_with_at_least_32_random_characters ]] || JWT_SECRET="$(random_secret)"
 [[ -n "$ADMIN_PASSWORD" && "$ADMIN_PASSWORD" != change_this_admin_password ]] || ADMIN_PASSWORD="$(random_secret)"
 [[ -n "$SRS_HOOK_SECRET" && "$SRS_HOOK_SECRET" != replace_with_random_hook_secret ]] || SRS_HOOK_SECRET="$(random_secret)"
+[[ -n "$TURN_SECRET" && "$TURN_SECRET" != replace_with_random_turn_secret ]] || TURN_SECRET="$(random_secret)"
 [[ -n "$CANDIDATE" && "$CANDIDATE" != YOUR_SERVER_PUBLIC_IPV4 ]] || CANDIDATE="$auto_ip"
 [[ -n "$CANDIDATE" && "$CANDIDATE" != "*" ]] || die "无法确定 SRS 公网候选 IP。请设置 CANDIDATE=你的VPS公网IPv4 后重新运行安装脚本。"
 [[ "$CANDIDATE" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "CANDIDATE 必须填写公网 IPv4 地址，当前值：$CANDIDATE"
@@ -104,6 +106,7 @@ set_env JWT_SECRET "$JWT_SECRET"
 set_env ADMIN_USERNAME "admin"
 set_env ADMIN_PASSWORD "$ADMIN_PASSWORD"
 set_env SRS_HOOK_SECRET "$SRS_HOOK_SECRET"
+set_env TURN_SECRET "$TURN_SECRET"
 set_env CANDIDATE "$CANDIDATE"
 set_env PLUGIN_ENABLED "${PLUGIN_ENABLED:-$(get_env PLUGIN_ENABLED)}"
 [[ -n "$(get_env PLUGIN_ENABLED)" ]] || set_env PLUGIN_ENABLED "welcome,stream-audit"
@@ -135,6 +138,17 @@ sed -e "s|\$CANDIDATE|${CANDIDATE}|g" \
 chmod 644 "$SCRIPT_DIR/srs.runtime.conf"
 grep -qE '\$(CANDIDATE|SRS_HOOK_SECRET)' "$SCRIPT_DIR/srs.runtime.conf" && die "SRS 运行时配置仍有未替换的变量，请检查 server/srs.conf 模板。"
 
+# coturn 的 REST 凭据共享密钥同样不能留在模板中：backend 用 TURN_SECRET 签发短期
+# 凭据，coturn 用同一个密钥校验。PUBLIC_HOST 作为 realm，CANDIDATE 作为
+# external-ip（云主机 1:1 NAT 时中继候选必须是公网地址）。
+log "生成 TURN 运行时配置（短期凭据密钥、公网地址）……"
+sed -e "s|\$TURN_SECRET|${TURN_SECRET}|g" \
+    -e "s|\$CANDIDATE|${CANDIDATE}|g" \
+    -e "s|\$PUBLIC_HOST|${PUBLIC_HOST}|g" \
+    "$SCRIPT_DIR/turn.conf" > "$SCRIPT_DIR/turn.runtime.conf"
+chmod 644 "$SCRIPT_DIR/turn.runtime.conf"
+grep -qE '\$(TURN_SECRET|CANDIDATE|PUBLIC_HOST)' "$SCRIPT_DIR/turn.runtime.conf" && die "TURN 运行时配置仍有未替换的变量，请检查 server/turn.conf 模板。"
+
 mkdir -p recordings/live srs-html/live srs-html/recordings plugin-data covers
 chmod 750 recordings plugin-data covers recordings/live srs-html srs-html/live srs-html/recordings
 # API 和 SRS 使用同一非特权 UID，便于录像枚举、回放、受控删除和封面上传。
@@ -145,7 +159,7 @@ log "检查 Docker Compose 配置及 WebUI 文件……"
 docker compose config -q
 
 # 浏览器推流需要 HTTPS 安全上下文；IP 模式生成自签名证书（浏览器会提示一次）。
-CERT_DIR="$APP_DIR/certs"
+CERT_DIR="$SCRIPT_DIR/certs"
 mkdir -p "$CERT_DIR"
 if [ ! -s "$CERT_DIR/web.crt" ] || [ ! -s "$CERT_DIR/web.key" ]; then
   openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
@@ -159,6 +173,10 @@ if command -v ufw >/dev/null 2>&1; then
   ufw allow OpenSSH >/dev/null || true
   ufw allow 8000/udp >/dev/null || true
   ufw allow 8000/tcp >/dev/null || true
+  # TURN 中继：coturn 以 host network 直接绑定 3478 与 relay 端口段。
+  ufw allow 3478/tcp >/dev/null || true
+  ufw allow 3478/udp >/dev/null || true
+  ufw allow 49160:49200/udp >/dev/null || true
   if [[ -n "$DOMAIN" ]]; then
     ufw allow 80/tcp >/dev/null || true
     ufw allow 443/tcp >/dev/null || true
@@ -181,9 +199,10 @@ if [[ -n "$DOMAIN" ]]; then
 else
   docker compose up -d --build
 fi
-# A bind-mounted SRS config can change without changing the Compose service hash.
-# Explicitly restart SRS so the HTTP publish hooks are loaded on upgrades too.
-docker compose restart srs >/dev/null
+# A bind-mounted SRS/TURN config can change without changing the Compose
+# service hash. Explicitly restart them so the publish hooks and the new relay
+# secret are loaded on upgrades too.
+docker compose restart srs coturn >/dev/null
 
 log "等待 API 健康检查……"
 health_url="http://127.0.0.1:3000/api/health"
@@ -208,7 +227,9 @@ if [[ -n "$DOMAIN" ]]; then
   printf '管理后台：  https://%s/admin\n' "$DOMAIN"
   printf 'API 地址：  https://%s\n' "$DOMAIN"
   printf 'WebRTC 媒体：UDP/TCP %s:8000\n' "$CANDIDATE"
-  warn "请确保域名 A/AAAA 记录指向此服务器；云防火墙开放 80、443 和 UDP/TCP 8000。WebRTC WHIP/WHEP API 通过 HTTPS 域名代理，媒体使用 8000 端口。"
+  printf 'TURN 中继：  turn:%s:3478?transport=udp / tcp（relay UDP 49160-49200）\n' "$PUBLIC_HOST"
+  printf 'TURN 凭据：  https://%s/api/turn-credentials（登录后短期有效）\n' "$DOMAIN"
+  warn "请确保域名 A/AAAA 记录指向此服务器；云防火墙开放 80、443、UDP/TCP 8000，以及 TURN 的 UDP/TCP 3478 和 UDP 49160-49200。WebRTC WHIP/WHEP API 通过 HTTPS 域名代理，媒体使用 8000 端口。"
 else
   printf 'Web 用户端：http://%s:8081\n' "$PUBLIC_HOST"
   printf '浏览器开播（HTTPS，自签名）：https://%s:8443\n' "$PUBLIC_HOST"
@@ -216,7 +237,10 @@ else
   printf 'API 地址：  http://%s:3000\n' "$PUBLIC_HOST"
   printf 'WebRTC 信令 API：http://%s:3000/api\n' "$PUBLIC_HOST"
   printf 'WebRTC 媒体：UDP/TCP %s:8000\n' "$CANDIDATE"
-  warn "IP 模式使用明文 HTTP，仅用于测试；WebRTC 手机端/浏览器建议使用 HTTPS 域名。请确认公网候选地址 CANDIDATE 正确，云防火墙已开放 UDP/TCP 8000。"
+  printf 'TURN 中继：  turn:%s:3478?transport=udp / tcp（relay UDP 49160-49200）\n' "$PUBLIC_HOST"
+  printf 'TURN 凭据：  http://%s:3000/api/turn-credentials（登录后短期有效）\n' "$PUBLIC_HOST"
+  warn "IP 模式使用明文 HTTP，仅用于测试；WebRTC 手机端/浏览器建议使用 HTTPS 域名。请确认公网候选地址 CANDIDATE 正确，云防火墙已开放 UDP/TCP 8000、UDP/TCP 3478 和 UDP 49160-49200。"
 fi
 printf '插件列表： %s/api/plugins\n' "$(if [[ -n "$DOMAIN" ]]; then printf 'https://%s' "$DOMAIN"; else printf 'http://%s:3000' "$PUBLIC_HOST"; fi)"
+printf 'TURN 凭据接口：%s/api/turn-credentials（Bearer 登录，默认 ttl 3600 秒）\n' "$(if [[ -n "$DOMAIN" ]]; then printf 'https://%s' "$DOMAIN"; else printf 'http://%s:3000' "$PUBLIC_HOST"; fi)"
 printf '\n常用命令：\n  cd %s/server\n  docker compose ps\n  docker compose logs -f backend srs\n  docker compose restart backend\n\n' "$PROJECT_DIR"

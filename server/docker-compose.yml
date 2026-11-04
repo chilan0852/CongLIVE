@@ -21,6 +21,22 @@ services:
     mem_limit: 384m
     networks: [conglive]
 
+  # coturn relays WebRTC voice traffic when peers sit behind strict NAT/firewalls.
+  # Host networking is required because the relay needs the dynamic UDP port
+  # range 49160-49200 directly; Docker's per-port publishing is slow for that.
+  # server/install.sh opens 3478 tcp/udp and 49160-49200/udp in UFW.
+  coturn:
+    image: coturn/coturn:4.18.0-r0
+    container_name: conglive-coturn
+    restart: unless-stopped
+    network_mode: host
+    # The image entrypoint prepends `turnserver`; the shared secret and public
+    # candidate are written into the read-only runtime config by install.sh.
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./turn.runtime.conf:/etc/coturn/turnserver.conf:ro
+    mem_limit: 128m
+
   mysql:
     image: mysql:8.4
     container_name: conglive-mysql
@@ -63,6 +79,11 @@ services:
       RTC_CANDIDATE: ${CANDIDATE:-}
       SRS_RTC_API: http://srs:1985
       SRS_HOOK_SECRET: ${SRS_HOOK_SECRET:?请先运行 server/install.sh}
+      # Short-lived coturn credentials (empty TURN_SECRET -> /api/turn-credentials 503 + STUN fallback).
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_HOST: ${TURN_HOST:-}
+      TURN_TTL: ${TURN_TTL:-3600}
       PUBLIC_API_SCHEME: ${PUBLIC_API_SCHEME:-http}
       PUBLIC_API_PORT: ${PUBLIC_API_PORT-3000}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}

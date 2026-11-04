@@ -12,6 +12,7 @@
  * Usage: npm run build && node e2e/backend-voice.mjs
  * Env: E2E_PORT (default 4175), PLAYWRIGHT_PATH, E2E_CHROME.
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -31,6 +32,14 @@ fs.mkdirSync(ARTIFACTS, { recursive: true });
 const { createVoiceSignaling, handleVoiceMessage, VOICE_LIMITS } = await import(
   new URL('../../backend/src/voice.js', import.meta.url)
 );
+// Real coturn REST credential helper: the browser must accept exactly the
+// payload the production route would return.
+const { createHmac } = crypto;
+const { buildTurnUrls, computeTurnCredential } = await import(
+  new URL('../../backend/src/turn-utils.js', import.meta.url)
+);
+const TURN_SECRET = 'integration-test-turn-secret';
+const TURN_URLS = buildTurnUrls({ host: 'turn.conglive.test' });
 const backendRequire = createRequire(`${repoRoot}/backend/package.json`);
 const { WebSocketServer } = backendRequire('ws');
 
@@ -116,6 +125,21 @@ const server = http.createServer((req, res) => {
   if (pathname === '/api/streams') return sendJson(res, 200, [STREAM]);
   if (pathname === '/api/streams/7') return sendJson(res, 200, STREAM);
   if (pathname === '/api/streams/7/whep') return sendJson(res, 409, { error: '主播尚未开播' });
+  // Real backend contract: authenticated request → short-lived coturn REST
+  // credentials. The `tok-noturn` account simulates a deployment without
+  // TURN_SECRET (real backend answers 503) to exercise the STUN fallback.
+  if (pathname === '/api/turn-credentials') {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer tok-')) return sendJson(res, 401, { error: '登录状态无效或已过期' });
+    if (authHeader === 'Bearer tok-noturn') return sendJson(res, 503, { error: 'TURN 中继未配置，已回退 STUN 直连' });
+    const credentials = computeTurnCredential({ secret: TURN_SECRET, ttl: 3600 });
+    return sendJson(res, 200, {
+      urls: TURN_URLS,
+      username: credentials.username,
+      credential: credentials.credential,
+      ttl: credentials.ttl,
+    });
+  }
   if (pathname.startsWith('/api/')) return sendJson(res, 404, { error: 'not found' });
   if (pathname.startsWith('/ws/')) { res.writeHead(400); res.end('websocket only'); return; }
 
@@ -254,6 +278,10 @@ async function main() {
       { label: 'host joined voice room', timeout: 20000 });
     record('backend: real voice-join registers the participant server-side',
       signaling.size(7) === 1, `room size=${signaling.size(7)}`);
+    await waitFor(async () => (await host.page.locator('.voice-relay.ok').count()) === 1,
+      { label: 'TURN relay chip', timeout: 10000 });
+    record('backend: real TURN credential payload is accepted before joining',
+      /中继：TURN/.test(await host.page.locator('.voice-relay').innerText()));
 
     await guest.page.getByRole('button', { name: '加入语音' }).click();
     await waitFor(async () => {
@@ -270,10 +298,25 @@ async function main() {
       return /已连接|说话中/.test(await rows.nth(1).innerText());
     }, { label: 'mesh connected through real signaling', timeout: 25000 });
     const hostMedia = await mediaStats(host.page);
+    const flattenUrls = (config) => config.flatMap((server) => (
+      Array.isArray(server.urls) ? server.urls : [server.urls]
+    )).filter(Boolean);
+    const voiceConfig = hostMedia.pcConfigs[hostMedia.pcConfigs.length - 1] || [];
+    const voiceUrls = flattenUrls(voiceConfig);
     record('backend: real offer/answer/candidate relay builds a connected mesh',
       hostMedia.trackPcCreated === 1 && hostMedia.remote.length === 1
       && hostMedia.remote[0].tracks.includes('audio'),
       JSON.stringify({ pc: hostMedia.trackPcCreated, remote: hostMedia.remote }));
+    const turnServer = voiceConfig.find((server) => server.username && server.credential) || null;
+    const expectedCredential = turnServer
+      ? createHmac('sha1', TURN_SECRET).update(turnServer.username).digest('base64')
+      : '';
+    record('backend: mesh PC uses the TURN URLs + coturn REST credential from /api/turn-credentials',
+      TURN_URLS.every((url) => voiceUrls.includes(url))
+      && !!turnServer
+      && /^\d+:conglive$/.test(turnServer.username)
+      && turnServer.credential === expectedCredential,
+      JSON.stringify(voiceConfig));
 
     // Server-side relay rules are active: bad target must yield target-not-found.
     const badTarget = await host.page.evaluate(() => new Promise((resolve) => {
@@ -319,6 +362,33 @@ async function main() {
     await waitFor(async () => (await denied.page.locator('.voice-panel').innerText()).includes('语音房不可用'),
       { label: 'denied voice join', timeout: 15000 });
     record('backend: rejected auth close (4403) is surfaced in the UI', true);
+
+    // Deployment without TURN_SECRET → 503 → direct/STUN fallback, mesh kept.
+    const noTurn = await newSession(browser, { token: 'tok-noturn', username: 'noturnuser' });
+    contexts.push(noTurn.context);
+    await noTurn.page.goto(`http://127.0.0.1:${PORT}/room/7`, { waitUntil: 'networkidle' });
+    await noTurn.page.locator('.voice-panel').waitFor({ timeout: 15000 });
+    await noTurn.page.getByRole('button', { name: '加入语音' }).click();
+    await waitFor(async () => (await noTurn.page.locator('.voice-relay.warn').count()) === 1,
+      { label: 'no-turn fallback chip', timeout: 15000 });
+    record('backend: 503 TURN response falls back to direct/STUN with a readable hint',
+      /中继不可用/.test(await noTurn.page.locator('.voice-relay').innerText())
+      && /无法获取 TURN 凭据（503）/.test(await noTurn.page.locator('.voice-panel').innerText()));
+    const noTurnMedia = await waitFor(async () => {
+      const media = await mediaStats(noTurn.page);
+      return media.trackPcCreated >= 1 ? media : null;
+    }, { label: 'no-turn fallback voice PC', timeout: 25000 });
+    const noTurnConfig = noTurnMedia.pcConfigs[noTurnMedia.pcConfigs.length - 1] || [];
+    const noTurnUrls = noTurnConfig.flatMap((server) => (
+      Array.isArray(server.urls) ? server.urls : [server.urls]
+    )).filter(Boolean);
+    record('backend: fallback mesh PC uses the two public STUN servers only',
+      noTurnUrls.length === 2 && noTurnUrls.every((url) => /^stun:/i.test(url)),
+      JSON.stringify(noTurnUrls));
+    await noTurn.page.getByRole('button', { name: '离开语音' }).click();
+    await waitFor(async () => (await noTurn.page.getByRole('button', { name: '加入语音' }).count()) === 1,
+      { label: 'no-turn leave', timeout: 10000 });
+    await noTurn.context.close();
 
     await shot(host.page, 'backend-voice-room');
     record('backend: no JS errors on voice pages',

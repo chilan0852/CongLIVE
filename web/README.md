@@ -1,4 +1,4 @@
-# CongLive Web 用户端 v0.8（开播工作台 + 房间语音房）
+# CongLive Web 用户端 v0.8.1（开播工作台 + 房间语音房 + TURN 中继）
 
 `web/` 是 React + TypeScript 用户端。实时直播通过浏览器原生 `RTCPeerConnection` 使用 WHIP 开播 / WHEP 播放，弹幕与语音房信令共用一个已登录的 `/ws/chat` WebSocket；语音媒体是浏览器之间的全双工 mesh，服务端只转发信令，不做媒体转发。
 
@@ -36,11 +36,24 @@ History API 路由，刷新/直达由 nginx 的 SPA fallback（`try_files $uri $
 - **静音 / 取消静音**：只切换本地音轨 `track.enabled`，不断开 mesh。
 - **参与者列表**：自己 + 远端听众，显示连接状态与「说话中」实时指示（本地与远端都通过音量电平检测）；主播在列表中有「主播」徽章。
 - **远端声音自动播放**：为每个远端 peer 创建隐藏 `<audio autoplay playsinline>`；浏览器拦截自动播放时显示「点击恢复声音」。
+- **TURN 中继 / STUN 回退**：点击「加入语音」时先带 Bearer token 请求 `GET /api/turn-credentials`；成功则把返回的 `urls` / `username` / `credential` 作为 `iceServers` 传给 mesh，面板显示「中继：TURN（跨 NAT 更稳定）」；401/404/503/网络失败或无有效 URL 时回退到两个公共 STUN（`stun:stun.l.google.com:19302` + `stun:stun.cloudflare.com:3478`），面板显示「中继不可用 · 直连 / STUN」并附带 HTTP 状态说明（中英双语）。凭据只用于本次加入/重连，所有远端 peer 复用同一份 ICE 配置；TURN 失败不会阻塞语音。
 - **错误提示**：未登录、语音房不可用（直播间结束/无权限）、麦克风权限拒绝/未找到/被占用、信令错误（`voice-error` 各 code 映射）、连接断开等都有中英双语提示与「重新加入」。
 
 ### 信令协议（与后端 task-7 `backend/src/voice.js` 对齐）
 
 复用已登录的房间 WebSocket `/ws/chat`（先 `auth` → 收到 `ready`）。另外开一条独立连接用于语音，不干扰弹幕 socket。
+
+TURN 凭据接口（与后端 task-10 对齐）：
+
+```http
+GET /api/turn-credentials
+Authorization: Bearer <token>
+200 { "urls": ["turn:域名:3478?transport=udp", "turn:域名:3478?transport=tcp", "stun:域名:3478"],
+      "username": "<expiry>:conglive", "credential": "<base64 HMAC-SHA1>", "ttl": 3600 }
+503 { "error": "TURN 中继未配置，已回退 STUN 直连" }
+```
+
+客户端只消费该响应，不持有 TURN_SECRET；凭据短时有效，重新加入/重连时会重新获取。coturn `use-auth-secret` 的服务端部署见 `server/`（task-10）。
 
 客户端 → 服务端：
 
@@ -96,9 +109,10 @@ mesh 建立规则（避免 glare）：`voice-peers` / `voice-peer-joined` 后比
 | `src/studio.tsx` | `/studio` 工作台页面（四步、预览、电平条、封面、Live2D、开播/停止）|
 | `src/whipPublisher.ts` | 共享 WHIP 发布引擎（创建直播间、封面、采集、Live2D 合成、SDP 协商、释放）|
 | `src/media.ts` | 采集预设、错误文案映射、H.264 偏好、ICE gathering、SDP 校验 |
-| `src/voice.ts` | 语音房信令客户端 + mesh（PeerConnection/audio/电平/清理）+ `useVoiceRoom` hook |
+| `src/voice.ts` | 语音房信令客户端 + mesh（可配置 `iceServers`、PeerConnection/audio/电平/清理）+ `useVoiceRoom` hook |
 | `src/audioLevel.ts` | 共享 AudioContext 的电平表与 `useLevelMeter` |
-| `src/room.tsx` | 独立直播间页面 + 语音房面板 + 主播工作台入口 |
+| `src/room.tsx` | 独立直播间页面 + 语音房面板（加入前取 TURN/回退 STUN + 中继状态）+ 主播工作台入口 |
+| `src/api.ts` | REST 客户端（直播/容量/详情/TURN 凭据 `fetchTurnCredentials` + STUN 回退常量） |
 | `src/live2d.ts` / `cover.ts` / `overlay.ts` | 复用：Live2D 加载、封面压缩/上传、Live2D 画面合成 |
 | `e2e/` | Playwright 端到端测试（3 个套件，见下）|
 
@@ -129,18 +143,18 @@ npx vite preview --port 4173 --host 127.0.0.1 &   # 套件 1
 1. **工作台 + 语音房（离线、确定性；mock REST + mock WS relay，两个页面之间真实 mesh）**
 
    ```bash
-   npm run e2e            # node e2e/studio-voice.mjs → 40 项
+   npm run e2e            # node e2e/studio-voice.mjs → 49 项
    ```
 
-   覆盖：`/studio` 路由与 4 步布局、设备检测与预览、麦克风电平条随采样变化、封面压缩、分辨率/帧率、WHIP 创建+协商请求、409 错误与释放；大厅不建 PC/不采集；房间语音加入前无媒体、join/peers、双页面 mesh 连通、远端 audio、说话指示、静音、离开清理、路由切换清理、4403/voice-error 提示、中英切换、390px 无横向溢出。
+   覆盖：`/studio` 路由与 4 步布局、设备检测与预览、麦克风电平条随采样变化、封面压缩、分辨率/帧率、WHIP 创建+协商请求、409 错误与释放；大厅不建 PC/不采集；房间语音加入前无媒体、join/peers、双页面 mesh 连通、远端 audio、说话指示、静音、离开清理、路由切换清理、4403/voice-error 提示、中英切换、390px 无横向溢出；**TURN 成功路径（凭据请求 / PC iceServers 断言 / 中继状态）与 503 回退路径（两个公共 STUN、中继不可用提示、回退会话仍能 mesh 与清理）**。
 
 2. **浏览器 ↔ 真实后端信令（导入 `backend/src/voice.js`，仅测试使用，不改后端）**
 
    ```bash
-   npm run e2e:backend-voice   # node e2e/backend-voice.mjs → 11 项
+   npm run e2e:backend-voice   # node e2e/backend-voice.mjs → 15 项
    ```
 
-   自建静态服务器 + `/ws/chat` 适配层，直接调用真实后端的 `createVoiceSignaling` / `handleVoiceMessage`：验证成员关系、peer 列表广播、offer/answer/candidate 转发、`target-not-found` 拒绝、peer-left、4403 提示，以及浏览器端清理。
+   自建静态服务器 + `/ws/chat` 适配层，直接调用真实后端的 `createVoiceSignaling` / `handleVoiceMessage`，并用真实 `turn-utils`（`computeTurnCredential`/`buildTurnUrls`）生成凭据：验证成员关系、peer 列表广播、offer/answer/candidate 转发、`target-not-found` 拒绝、peer-left、4403 提示、浏览器端清理，以及 **TURN 凭据被浏览器正确使用（HMAC 校验）与 503 回退 STUN**。
 
 3. **真实 WHIP/WHEP 回归（需要可访问的部署）**
 
@@ -159,6 +173,7 @@ Playwright 解析顺序：`PLAYWRIGHT_PATH` 环境变量 → `playwright` 模块
 - 浏览器开播需要安全上下文（`https://` 或 localhost）；`http://IP:8081` 下开播按钮禁用，观看/WHEP/弹幕不受影响。
 - Live2D 模型与 Cubism Core 都从网络加载（不内置），模型服务器需允许 CORS；合成画面需要浏览器支持 `canvas.captureStream`。
 - 语音房需要后端 task-7 的 `voice-*` 信令已部署；未部署时加入语音会收到明确错误提示。真实语音媒体是浏览器 P2P mesh，人数很多时上传带宽随 peer 数增长（适合中小型语音房）。
+- TURN 中继需要部署 coturn 并配置 `TURN_SECRET`（task-10）；未配置时接口返回 503，网页自动回退 STUN 直连，严格 NAT/防火墙环境下可能无法建立音频（界面会明确显示“中继不可用 · 直连 / STUN”）。
 - 真机 iOS/Safari 的自动播放策略更严格，已提供「点击恢复声音」兜底。
 
 ## 九、部署

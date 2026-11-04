@@ -481,6 +481,10 @@ const zh = {
   'voice.error.rateLimited': '语音信令过于频繁，请稍后重试。',
   'voice.error.signal': '语音信令错误。',
   'voice.error.peerFailed': '与某位参与者的音频连接失败，可尝试离开后重新加入。',
+  'voice.relay.checking': '正在获取中继凭据…',
+  'voice.relay.turn': '中继：TURN（跨 NAT 更稳定）',
+  'voice.relay.stun': '中继不可用 · 直连 / STUN',
+  'voice.relay.fallback': '无法获取 TURN 凭据（{status}），已回退 STUN 直连；严格 NAT/防火墙环境可能无法建立语音。',
 
   /* ---------- footer ---------- */
   'footer.brand': '葱直播 CongLive',
@@ -955,6 +959,10 @@ const en: Record<I18nKey, string> = {
   'voice.error.rateLimited': 'Voice signals are being sent too often. Please try again later.',
   'voice.error.signal': 'Voice signaling error.',
   'voice.error.peerFailed': 'The audio connection with one participant failed. Leave and rejoin to retry.',
+  'voice.relay.checking': 'Fetching relay credentials…',
+  'voice.relay.turn': 'Relay: TURN (more stable across NATs)',
+  'voice.relay.stun': 'Relay unavailable · direct / STUN',
+  'voice.relay.fallback': 'Could not fetch TURN credentials ({status}); falling back to direct STUN. Strict NAT/firewalls may block voice.',
 
   /* ---------- footer ---------- */
   'footer.brand': 'CongLive',

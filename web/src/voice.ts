@@ -25,6 +25,33 @@ import { chatSocketUrl } from './api';
 import { createLevelMeter, type LevelMeter } from './audioLevel';
 import { LocalizedError, backendText, msg, rawText, type TextMessage } from './i18n';
 
+/** ICE config used when the caller passes no TURN credentials (backward compatible). */
+export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+/**
+ * Validate/normalize RTCIceServer entries so a malformed TURN credential payload
+ * can never break `new RTCPeerConnection`. Returns null when nothing usable is
+ * left, which keeps the caller on the previous/default ICE config.
+ */
+function normalizeIceServers(servers: RTCIceServer[] | null | undefined): RTCIceServer[] | null {
+  if (!Array.isArray(servers)) return null;
+  const normalized: RTCIceServer[] = [];
+  for (const server of servers) {
+    if (!server || typeof server !== 'object') continue;
+    const rawUrls = server.urls as string | string[] | undefined;
+    const list = Array.isArray(rawUrls) ? rawUrls : typeof rawUrls === 'string' ? [rawUrls] : [];
+    const urls = list
+      .map((url) => (typeof url === 'string' ? url.trim() : ''))
+      .filter(Boolean);
+    if (!urls.length) continue;
+    const entry: RTCIceServer = { urls };
+    if (typeof server.username === 'string' && server.username) entry.username = server.username;
+    if (typeof server.credential === 'string' && server.credential) entry.credential = server.credential;
+    normalized.push(entry);
+  }
+  return normalized.length ? normalized : null;
+}
+
 export type VoicePeer = { peerId: string; userId: number; username: string };
 export type VoicePhase = 'idle' | 'connecting' | 'joining' | 'joined' | 'error';
 export type VoicePeerState = 'connecting' | 'connected' | 'failed';
@@ -74,6 +101,8 @@ export type VoiceClientOptions = {
   token: string;
   streamId: number;
   onChange: (snapshot: VoiceSnapshot) => void;
+  /** ICE servers for every mesh PeerConnection (TURN credentials or STUN fallback). */
+  iceServers?: RTCIceServer[];
   /** Container for the hidden remote <audio> elements (may be null → detached). */
   getAudioHost?: () => HTMLElement | null;
 };
@@ -172,9 +201,12 @@ export class VoiceClient {
   private leaving = false;
   /** Bumped on every join/leave so stale async continuations can bail out. */
   private generation = 0;
+  /** ICE config reused by every peer of the current session (TURN or STUN). */
+  private iceServers: RTCIceServer[];
 
   constructor(options: VoiceClientOptions) {
     this.options = options;
+    this.iceServers = normalizeIceServers(options.iceServers) ?? DEFAULT_ICE_SERVERS;
   }
 
   get state(): VoiceSnapshot {
@@ -202,14 +234,20 @@ export class VoiceClient {
    * Join / leave
    * ------------------------------------------------------------------ */
 
-  /** Join the voice room: capture the mic, connect signaling and build the mesh. */
-  async join(): Promise<void> {
+  /**
+   * Join the voice room: capture the mic, connect signaling and build the mesh.
+   * `iceServers` (TURN credentials fetched right before joining, or the STUN
+   * fallback) is reused by every PeerConnection of this session and by retries.
+   */
+  async join(iceServers?: RTCIceServer[]): Promise<void> {
     if (this.disposed) return;
     if (this.snapshot.phase === 'connecting' || this.snapshot.phase === 'joining' || this.snapshot.phase === 'joined') return;
     if (!this.options.token) {
       this.patch({ phase: 'error', error: msg('voice.error.auth') });
       return;
     }
+    const override = normalizeIceServers(iceServers);
+    if (override) this.iceServers = override;
     this.teardown();
     const generation = ++this.generation;
     const muted = this.snapshot.muted;
@@ -417,7 +455,7 @@ export class VoiceClient {
       existing.info = info;
       return existing;
     }
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     const remoteStream = new MediaStream();
     const state: PeerConnectionState = {
       info,
@@ -692,12 +730,18 @@ export type UseVoiceRoomOptions = {
   streamId: number | null;
   /** False when the room ended / no auth: joining is disabled and state resets. */
   enabled: boolean;
+  /**
+   * Default ICE servers for the session; `join(iceServers)` can override them
+   * with freshly fetched TURN credentials. Keep this reference stable.
+   */
+  iceServers?: RTCIceServer[];
 };
 
 export type VoiceRoomApi = {
   snapshot: VoiceSnapshot;
   audioHostRef: RefObject<HTMLDivElement>;
-  join: () => void;
+  /** Join and optionally override the ICE config (TURN credentials / STUN fallback). */
+  join: (iceServers?: RTCIceServer[]) => void;
   leave: () => void;
   toggleMute: () => void;
   resumeAudio: () => void;
@@ -720,6 +764,7 @@ export function useVoiceRoom(options: UseVoiceRoomOptions): VoiceRoomApi {
       token: options.token,
       streamId: options.streamId,
       onChange,
+      iceServers: options.iceServers,
       getAudioHost: () => audioHostRef.current,
     });
     clientRef.current = client;
@@ -728,9 +773,9 @@ export function useVoiceRoom(options: UseVoiceRoomOptions): VoiceRoomApi {
       if (clientRef.current === client) clientRef.current = null;
       setSnapshot(INITIAL_VOICE_SNAPSHOT);
     };
-  }, [options.enabled, options.streamId, options.token, onChange]);
+  }, [options.enabled, options.streamId, options.token, options.iceServers, onChange]);
 
-  const join = useCallback(() => { void clientRef.current?.join(); }, []);
+  const join = useCallback((iceServers?: RTCIceServer[]) => { void clientRef.current?.join(iceServers); }, []);
   const leave = useCallback(() => { clientRef.current?.leave(); }, []);
   const toggleMute = useCallback(() => { clientRef.current?.toggleMute(); }, []);
   const resumeAudio = useCallback(() => { void clientRef.current?.resumeAudio(); }, []);

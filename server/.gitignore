@@ -1,5 +1,6 @@
 .env
 srs.runtime.conf
+turn.runtime.conf
 recordings/**
 !recordings/.gitkeep
 plugin-data/**

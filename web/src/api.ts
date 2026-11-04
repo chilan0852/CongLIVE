@@ -178,6 +178,97 @@ export async function fetchCapacity(signal?: AbortSignal): Promise<CapacityInfo 
   }
 }
 
+/**
+ * STUN-only fallback used when `GET /api/turn-credentials` is unavailable
+ * (no TURN_SECRET configured → 503, session expired → 401, network error…).
+ * Kept as a module constant so every VoiceClient/PeerConnection reuses the
+ * same array instead of rebuilding configs on each render.
+ */
+export const STUN_FALLBACK_ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
+
+/** A short-lived TURN credential set from `GET /api/turn-credentials`. */
+export type TurnCredentials = {
+  /** turn:/turns:/stun: URLs (UDP/TCP relay + STUN from the same server). */
+  urls: string[];
+  /** `<expiry>:conglive` (coturn `use-auth-secret` style REST username). */
+  username: string;
+  /** base64 HMAC-SHA1 of the username with TURN_SECRET. */
+  credential: string;
+  /** Validity in seconds when the server reports it. */
+  ttl: number | null;
+  /** Ready to pass to `new RTCPeerConnection({ iceServers })`. */
+  iceServers: RTCIceServer[];
+};
+
+export type TurnCredentialsResult =
+  | { status: 'ok'; credentials: TurnCredentials }
+  | { status: 'unavailable'; code: number | null };
+
+const ICE_SERVER_URL = /^(stun|stuns|turn|turns):/i;
+
+/** Accept a string or string[] from the backend and keep only ICE schemes. */
+function normalizeIceUrls(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
+  const urls: string[] = [];
+  for (const item of list) {
+    if (typeof item !== 'string') continue;
+    const url = item.trim();
+    if (url && ICE_SERVER_URL.test(url) && !urls.includes(url)) urls.push(url);
+  }
+  return urls;
+}
+
+/**
+ * Fetch short-lived TURN credentials for the mesh voice room.
+ *
+ * Requires the signed-in user's token (the route is authenticated). Every
+ * failure is reported as `unavailable` with the HTTP status when there is one,
+ * so the caller can fall back to STUN and show the "relay unavailable → direct"
+ * state without breaking the voice room.
+ */
+export async function fetchTurnCredentials(
+  token: string,
+  signal?: AbortSignal,
+): Promise<TurnCredentialsResult> {
+  if (!token) return { status: 'unavailable', code: 401 };
+  let response: Response;
+  try {
+    response = await fetch(`${API}/api/turn-credentials`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+      signal,
+    });
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error;
+    return { status: 'unavailable', code: null };
+  }
+  if (!response.ok) return { status: 'unavailable', code: response.status };
+  const data = await response.json().catch(() => null);
+  if (!data || typeof data !== 'object') return { status: 'unavailable', code: null };
+  const urls = normalizeIceUrls(data.urls);
+  if (!urls.length) return { status: 'unavailable', code: null };
+  const username = typeof data.username === 'string' ? data.username.trim() : '';
+  const credential = typeof data.credential === 'string' ? data.credential.trim() : '';
+  const iceServers: RTCIceServer[] = [{ urls }];
+  if (username && credential) {
+    iceServers[0].username = username;
+    iceServers[0].credential = credential;
+  }
+  return {
+    status: 'ok',
+    credentials: {
+      urls,
+      username,
+      credential,
+      ttl: finiteOrNull(data.ttl),
+      iceServers,
+    },
+  };
+}
+
 /** Build a local WebSocket URL for the chat channel (same origin or the API origin). */
 export function chatSocketUrl(): string {
   if (API) return `${API.replace(/^http/, 'ws')}/ws/chat`;

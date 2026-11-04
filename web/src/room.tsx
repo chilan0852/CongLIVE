@@ -6,11 +6,13 @@
  * latency chips, WHEP player, chat) while the App owns the actual WHEP/WS connections,
  * which keeps a single PeerConnection for the current room.
  */
-import { useEffect, useRef, type FormEvent, type RefObject } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import { useVoiceRoom, type VoicePeer, type VoicePhase } from './voice';
 import {
+  STUN_FALLBACK_ICE_SERVERS,
   coverFallbackChar,
   coverFallbackStyle,
+  fetchTurnCredentials,
   streamCoverUrl,
   type ChatMessage,
   type RoomDetail,
@@ -154,6 +156,68 @@ function VoicePanel({ token, streamId, enabled, currentUsername, hostName, isHos
   const participants = snapshot.peers.length + (joined ? 1 : 0);
   const localSpeaking = joined && !snapshot.muted && snapshot.localLevel > 0.07;
   const selfName = t('voice.self');
+  // TURN credentials are fetched right before joining; failures fall back to STUN.
+  const [relay, setRelay] = useState<'idle' | 'checking' | 'turn' | 'stun'>('idle');
+  const [relayCode, setRelayCode] = useState<number | null>(null);
+  const [joinBusy, setJoinBusy] = useState(false);
+  const fetchController = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+
+  // Abort an in-flight credential fetch when the panel unmounts / the room changes.
+  useEffect(() => () => {
+    mounted.current = false;
+    fetchController.current?.abort();
+  }, []);
+  useEffect(() => {
+    setRelay('idle');
+    setRelayCode(null);
+    setJoinBusy(false);
+    fetchController.current?.abort();
+    fetchController.current = null;
+    return () => { fetchController.current?.abort(); };
+  }, [streamId, enabled]);
+
+  /**
+   * Join flow: fetch short-lived TURN credentials first, then hand the ready
+   * `iceServers` (or the two-STUN fallback) to the mesh client. A failed/503
+   * credential request must not block voice — it only switches to direct mode.
+   */
+  async function handleJoin(): Promise<void> {
+    if (joinBusy || !token || !enabled) return;
+    fetchController.current?.abort();
+    const controller = new AbortController();
+    fetchController.current = controller;
+    setJoinBusy(true);
+    setRelay('checking');
+    setRelayCode(null);
+    let servers: RTCIceServer[] = STUN_FALLBACK_ICE_SERVERS;
+    let mode: 'turn' | 'stun' = 'stun';
+    let code: number | null = null;
+    try {
+      const result = await fetchTurnCredentials(token, controller.signal);
+      if (result.status === 'ok') {
+        servers = result.credentials.iceServers;
+        mode = 'turn';
+      } else {
+        code = result.code;
+      }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return;
+      code = null;
+    }
+    if (controller.signal.aborted || !mounted.current) return;
+    fetchController.current = null;
+    setJoinBusy(false);
+    setRelay(mode);
+    setRelayCode(mode === 'stun' ? code : null);
+    voice.join(servers);
+  }
+
+  function handleLeave(): void {
+    setRelay('idle');
+    setRelayCode(null);
+    voice.leave();
+  }
 
   return (
     <section className="panel voice-panel" id="voice" aria-labelledby="voice-title">
@@ -168,6 +232,25 @@ function VoicePanel({ token, streamId, enabled, currentUsername, hostName, isHos
             </span>
           </h2>
           <p className="hint">{t('voice.hint')}</p>
+          {relay !== 'idle' && (
+            <p
+              className={`voice-relay ${relay === 'turn' ? 'ok' : relay === 'stun' ? 'warn' : 'info'}`}
+              role="status"
+              aria-live="polite"
+            >
+              <i aria-hidden="true" />
+              {relay === 'checking'
+                ? t('voice.relay.checking')
+                : relay === 'turn'
+                  ? t('voice.relay.turn')
+                  : t('voice.relay.stun')}
+            </p>
+          )}
+          {relay === 'stun' && (
+            <p className="hint warn-text voice-relay-fallback">
+              {t('voice.relay.fallback', { status: relayCode === null ? '—' : relayCode })}
+            </p>
+          )}
         </div>
         {joined && (
           <span className="hint">{t('voice.participants', { count: participants })}</span>
@@ -190,8 +273,16 @@ function VoicePanel({ token, streamId, enabled, currentUsername, hostName, isHos
 
       {!joined && !busy ? (
         <div className="voice-join">
-          <button type="button" onClick={voice.join} disabled={!token || !enabled}>
-            {snapshot.phase === 'error' ? t('voice.retry') : t('voice.join')}
+          <button
+            type="button"
+            onClick={() => void handleJoin()}
+            disabled={!token || !enabled || joinBusy}
+          >
+            {joinBusy
+              ? t('voice.relay.checking')
+              : snapshot.phase === 'error'
+                ? t('voice.retry')
+                : t('voice.join')}
           </button>
           <p className="hint">{t('voice.joinHint')}</p>
         </div>
@@ -206,7 +297,7 @@ function VoicePanel({ token, streamId, enabled, currentUsername, hostName, isHos
             >
               {snapshot.muted ? t('voice.unmute') : t('voice.mute')}
             </button>
-            <button type="button" className="ghost small" onClick={voice.leave}>
+            <button type="button" className="ghost small" onClick={handleLeave}>
               {t('voice.leave')}
             </button>
           </div>

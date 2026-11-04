@@ -99,8 +99,8 @@ async function newSession({ token = 'tok-e2e', username = 'e2eviewer', locale = 
   return { context, page, errors };
 }
 
-async function attachMocks(page, voiceServer) {
-  const calls = await mockApi(page);
+async function attachMocks(page, voiceServer, options = {}) {
+  const calls = await mockApi(page, options);
   await page.routeWebSocket('**/ws/chat', voiceServer.handler());
   return calls;
 }
@@ -252,8 +252,8 @@ async function testStudio(voiceServer) {
 /* ------------------------------------------------------------------ *
  * 3. Room page: voice join, mesh between two pages, speaking UI, cleanup
  * ------------------------------------------------------------------ */
-async function openRoom(session, voiceServer) {
-  const calls = await attachMocks(session.page, voiceServer);
+async function openRoom(session, voiceServer, options = {}) {
+  const calls = await attachMocks(session.page, voiceServer, options);
   await session.page.goto(`${BASE}/room/7`, { waitUntil: 'networkidle' });
   await session.page.locator('.voice-panel').waitFor({ timeout: 15000 });
   return calls;
@@ -262,7 +262,7 @@ async function openRoom(session, voiceServer) {
 async function testRoomVoice(voiceServer) {
   const host = await newSession({ token: 'tok-host', username: 'hostuser' });
   const guest = await newSession({ token: 'tok-guest', username: 'listener2' });
-  await openRoom(host, voiceServer);
+  const callsForHost = await openRoom(host, voiceServer);
   await openRoom(guest, voiceServer);
   const hostPage = host.page;
   const guestPage = guest.page;
@@ -316,6 +316,26 @@ async function testRoomVoice(voiceServer) {
     hostMedia.remote.length === 1 && hostMedia.remote[0].tracks.includes('audio')
     && guestMedia.remote.length === 1 && guestMedia.remote[0].tracks.includes('audio'),
     JSON.stringify({ host: hostMedia.remote, guest: guestMedia.remote }));
+
+  // TURN: credentials are fetched before joining and used by the mesh PCs.
+  const relayText = await hostPage.locator('.voice-relay').innerText();
+  record('turn: relay status shows TURN after prefetching credentials',
+    /中继：TURN/.test(relayText), relayText.replace(/\n/g, ' '));
+  const flattenUrls = (config) => config.flatMap((server) => (
+    Array.isArray(server.urls) ? server.urls : [server.urls]
+  )).filter(Boolean);
+  const hostConfigs = hostMedia.pcConfigs;
+  const hostVoiceConfig = hostConfigs[hostConfigs.length - 1] || [];
+  const hostVoiceUrls = flattenUrls(hostVoiceConfig);
+  record('turn: voice PeerConnection is built with the fetched TURN credentials',
+    hostVoiceUrls.some((url) => url.startsWith('turn:'))
+    && hostVoiceConfig.some((server) => server.username === '1999999999:conglive'
+      && server.credential === 'dGVzdC1jcmVkZW50aWFs'),
+    JSON.stringify(hostVoiceConfig));
+  record('turn: credentials endpoint is called once with the bearer token',
+    callsForHost.turnCredentials.length === 1
+    && /^Bearer tok-host$/.test(callsForHost.turnCredentials[0]),
+    JSON.stringify(callsForHost.turnCredentials));
 
   const signaling = voiceServer.events.reduce((acc, event) => {
     acc[event.type] = (acc[event.type] || 0) + 1;
@@ -377,6 +397,81 @@ async function testRoomVoice(voiceServer) {
 
   await guest.context.close();
   await host.context.close();
+}
+
+/* ------------------------------------------------------------------ *
+ * 3b. TURN fallback: /api/turn-credentials 503 → direct STUN mode
+ * ------------------------------------------------------------------ */
+async function testTurnFallback(voiceServer) {
+  const relayRoom = new MockVoiceServer();
+  const host = await newSession({ token: 'tok-turnhost', username: 'turnhost' });
+  const fallback = await newSession({ token: 'tok-turnfallback', username: 'turnlistener' });
+  const hostCalls = await openRoom(host, relayRoom);
+  const fallbackCalls = await openRoom(fallback, relayRoom, { turnMode: 'unavailable' });
+
+  await host.page.getByRole('button', { name: '加入语音' }).click();
+  await waitFor(async () => (await host.page.locator('.voice-relay.ok').count()) === 1,
+    { label: 'TURN relay chip', timeout: 20000 });
+  record('turn: successful fetch shows the TURN relay state before joining',
+    /中继：TURN/.test(await host.page.locator('.voice-relay').innerText()));
+
+  await fallback.page.getByRole('button', { name: '加入语音' }).click();
+  await waitFor(async () => (await fallback.page.locator('.voice-relay.warn').count()) === 1,
+    { label: 'STUN fallback relay chip', timeout: 20000 });
+  const fallbackPanel = await fallback.page.locator('.voice-panel').innerText();
+  record('turn: 503 falls back to direct/STUN mode with a bilingual hint',
+    /中继不可用/.test(fallbackPanel) && /无法获取 TURN 凭据（503）/.test(fallbackPanel),
+    fallbackPanel.split('\n').filter((line) => /中继|TURN/.test(line)).join(' | ').slice(0, 160));
+  record('turn: fallback still calls the credentials endpoint (no silent skip)',
+    fallbackCalls.turnCredentials.length === 1 && hostCalls.turnCredentials.length === 1);
+
+  // Relay status must be bilingual too (topbar switch re-renders it live).
+  await fallback.page.getByRole('button', { name: 'English' }).click();
+  await waitFor(async () => /Relay unavailable/.test(await fallback.page.locator('.voice-panel').innerText()),
+    { label: 'english relay fallback text', timeout: 8000 });
+  record('turn: relay fallback state is bilingual (zh → en)',
+    /direct \/ STUN/.test(await fallback.page.locator('.voice-relay').innerText()));
+  await fallback.page.getByRole('button', { name: '中文' }).click();
+  await waitFor(async () => /中继不可用/.test(await fallback.page.locator('.voice-relay').innerText()),
+    { label: 'chinese relay fallback restored', timeout: 8000 });
+
+  await waitFor(async () => {
+    const rowsHost = await host.page.locator('.voice-peers .voice-peer').count();
+    const rowsFallback = await fallback.page.locator('.voice-peers .voice-peer').count();
+    return rowsHost === 2 && rowsFallback === 2;
+  }, { label: 'fallback participant joins the mesh', timeout: 20000 });
+
+  const flatten = (config) => config.flatMap((server) => (
+    Array.isArray(server.urls) ? server.urls : [server.urls]
+  )).filter(Boolean);
+  const fallbackMedia = await mediaStats(fallback.page);
+  const fallbackVoiceConfig = fallbackMedia.pcConfigs[fallbackMedia.pcConfigs.length - 1] || [];
+  const fallbackUrls = flatten(fallbackVoiceConfig);
+  record('turn: fallback PeerConnection uses the two public STUN servers',
+    fallbackUrls.length === 2
+    && fallbackUrls.every((url) => /^stun:/i.test(url))
+    && fallbackUrls.some((url) => url.includes('stun.l.google.com:19302'))
+    && fallbackUrls.some((url) => url.includes('stun.cloudflare.com:3478'))
+    && !fallbackUrls.some((url) => /^turns?:/i.test(url)),
+    JSON.stringify(fallbackUrls));
+
+  // Fallback sessions must keep the same mesh + cleanup guarantees.
+  await waitFor(async () => {
+    const rows = fallback.page.locator('.voice-peers .voice-peer');
+    if (await rows.count() !== 2) return false;
+    return /已连接|说话中/.test(await rows.nth(1).innerText());
+  }, { label: 'fallback mesh connected', timeout: 25000 }).catch(() => undefined);
+  await fallback.page.getByRole('button', { name: '离开语音' }).click();
+  await waitFor(async () => (await fallback.page.getByRole('button', { name: '加入语音' }).count()) === 1,
+    { label: 'fallback leave', timeout: 10000 });
+  const left = await mediaStats(fallback.page);
+  record('turn: fallback session cleans up PeerConnections/tracks on leave',
+    left.trackPcClosed === left.trackPcCreated && left.remote.length === 0
+    && left.localTracks.every((state) => state === 'ended'),
+    JSON.stringify({ created: left.trackPcCreated, closed: left.trackPcClosed }));
+
+  await host.context.close();
+  await fallback.context.close();
 }
 
 /* ------------------------------------------------------------------ *
@@ -454,6 +549,7 @@ async function main() {
     await testLobbyNoVoice(voiceServer);
     await testStudio(voiceServer);
     await testRoomVoice(voiceServer);
+    await testTurnFallback(voiceServer);
     await testVoiceErrors();
     await testMobileLayout(voiceServer);
   } catch (error) {
