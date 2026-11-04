@@ -1,4 +1,4 @@
-# CongLive Android v0.7.7 — 中英双语 + 暗色 UI + 封面上传 + Live2D 看板娘
+# CongLive Android v0.7.9 — 独立直播间 + 1080p60 容量门控 + 延迟监控 + 域名服务器
 
 Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观看使用 WHEP；保留账号、个人直播、WebSocket 弹幕和 MP4 录像播放。
 
@@ -13,9 +13,13 @@ Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观�
 - 摄像头采集运行于带 `camera|microphone` 类型的前台服务；停止直播、采集失败或服务关闭时会停止并释放 Camera2 capturer。
 - 视频优先协商 H.264，编码器固定为 Baseline（`DefaultVideoEncoderFactory(egl, true, false)`，关闭 High Profile）。
 - 开播页可选择分辨率与帧率，选择结果通过 SharedPreferences 持久化（默认 720p / 24fps）：
-  - 分辨率：720p 1280×720 / 2 Mbps、540p 960×540 / 1.2 Mbps、360p 640×360 / 800 kbps。
-  - 帧率：30 / 24 / 15 fps。
+  - 分辨率：1080p 1920×1080 / 6 Mbps（受服务器容量门控）、720p 1280×720 / 2 Mbps、540p 960×540 / 1.2 Mbps、360p 640×360 / 800 kbps。
+  - 帧率：60 / 30 / 24 / 15 fps（60fps 受服务器容量门控）。
+  - 打开开播页与点击开始前都会请求 `GET /api/capacity`；`allow1080p60=false` 时 1080p 与 60fps 按钮禁用并显示原因（当前 2C/2G 服务器会禁用）。
+  - 码率夹取：只有 1080p + 60fps 使用高码率（≤8 Mbps），其余组合一律 ≤2 Mbps；Activity 与 Service 双重夹取。
   - 摄像头直播按横屏尺寸采集，屏幕直播按竖屏尺寸采集（服务端交换宽高），码率与帧率写入视频 RTP sender。
+- 大厅点击直播卡片进入**独立直播间页面**（全屏替代大厅）：返回按钮、封面/标题/主播、WHEP 播放器、实时弹幕、观看人数；`GET /api/streams/:id` 轮询 + WebSocket `viewers` 更新人数，直播结束或 404 自动回大厅。
+- WHEP 播放每秒通过 `getStats` 读取 `jitterBufferDelay / jitterBufferEmittedCount` 与 `currentRoundTripTime`，在房间页显示「延迟≈Xms」；停止播放/离开房间即停止采样并释放 PeerConnection。
 - 麦克风由 `org.webrtc.audio.JavaAudioDeviceModule` 提供。
 - WHEP 客户端接收音视频，直播不使用 HLS/HTTP-FLV。
 - WebSocket 弹幕、个人录像列表、Media3 MP4 回放保留。
@@ -41,10 +45,12 @@ gradle :app:assembleDebug
 
 ## 服务端地址
 
-首次启动默认 `http://10.0.2.2:3000` 仅用于 Android 模拟器。实体手机应填写真实 API 根地址，不要添加 `/api`：
+首次启动默认 `http://10.0.2.2:3000` 仅用于 Android 模拟器。实体手机应填写真实服务器地址，不要添加 `/api`：
 
-- 域名 HTTPS：`https://live.example.com`
-- IP 测试：`http://203.0.113.10:3000`（只建议受控测试）
+- 只填域名会自动补 `https://`：`live.example.com` → `https://live.example.com`
+- 保留端口：`live.example.com:8443` → `https://live.example.com:8443`
+- IP 测试：`203.0.113.10:3000` → `http://203.0.113.10:3000`（只建议受控测试）
+- 显式写 `http://` / `https://` 时原样保留；尾部 `/` 会被去掉，保存后自动请求 `/api/health` 校验。
 
 ## 推流步骤
 
@@ -95,3 +101,15 @@ gradle :app:assembleDebug
 - **服务与播放状态按语言输出**：`ScreenStreamService` 读取 SharedPreferences `app_language`（并接受 Activity 传入的 `EXTRA_LANGUAGE` Intent extra），通知栏文案、摄像头/ICE/WHIP 状态与错误均按当前语言输出；同时广播机器可读的 `EXTRA_STATUS_CODE`，Activity 不再依赖中文字符串判断状态。`WebRtcPlaybackClient`、`CameraPreviewBridge`、`Live2DViewer` 及 `viewer.html` 的用户可见状态同样支持中英双语。
 - **后端中文错误映射**：英文模式下对常见后端错误做客户端映射（如需要登录、直播不存在、封禁、封面超限等），未知错误保留原文。
 - **版本**：versionCode 19 / versionName 0.7.7，minSdk 29 / targetSdk 34。0.7.6 的分辨率/帧率、setZOrderOnTop、init-before-addView、Baseline H.264、封面与 Live2D 入口全部保留。
+
+## v0.7.9 新增（独立直播间 / 1080p60 / 延迟 / 域名）
+
+- **独立直播间页面**：大厅点击直播卡片（或「进入直播间」按钮）进入全屏房间页，顶部返回 / 封面 / 标题 / 主播 / 直播状态，下方 WHEP 播放器 + 观看人数 + 延迟 + 实时弹幕与输入框；隐藏 App 头部、状态胶囊和底部导航，返回键/返回按钮/「离开直播间」回到大厅。
+- **房间数据**：进入后 `GET /api/streams/:id` 拉取详情（标题、封面、`whepPath`、`viewers`、`is_live`），仅在房间页 5 秒轮询一次；WebSocket 收到 `{type:"viewers",streamId,viewers}` 时即时刷新人数；直播结束或 404 自动回大厅。
+- **1080p / 60fps 容量门控**：新增 1080p（1920×1080 / 6 Mbps）与 60fps 选项，保留 720p/540p/360p 与 30/24/15。打开开播页和点击开始前 `GET /api/capacity`，`allow1080p60=false`（当前 2C/2G 服务器）时两个按钮禁用并显示原因；已保存的高画质选择会自动回退 720p/24fps。
+- **码率夹取**：只有 1080p + 60fps 使用高码率；其余档位保持低码率（≤2 Mbps）。`ScreenStreamService` 对 Intent 参数和 `prepareVideo` 双重夹取，并支持 1080p 竖屏（屏幕）/横屏（摄像头）采集。
+- **延迟监控**：`WebRtcPlaybackClient` 每秒 `getStats` 计算 `jitterBufferDelay / jitterBufferEmittedCount` 平均抖动缓冲 + 候选对 `currentRoundTripTime`，房间页显示「延迟≈Xms」；`close()` 停止采样并释放监听，离开/停止即清理。
+- **服务器地址支持域名**：`live.example.com` 自动补 `https://`，裸 IP 默认 `http://`；保留已有协议/端口，校验 http(s)、去掉尾部 `/`；保存后自动请求 `/api/health`，中英双语提示。
+- **性能**：直播间之外不创建 PeerConnection、不轮询房间详情、不启动 getStats；大厅刷新不会重建房间页；1080p60 之外不上高码率。
+- **保留 0.7.8 的图标 / 中英双语 / 摄像头预览与 setZOrderOnTop / init-before-addView 修复**。
+- **版本**：versionCode 21 / versionName 0.7.9，minSdk 29 / targetSdk 34。

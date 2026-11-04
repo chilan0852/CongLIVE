@@ -31,48 +31,30 @@ import {
   useLive2DState,
 } from './live2d';
 import { createOverlayStream, type OverlayHandle } from './overlay';
+import {
+  API,
+  coverFallbackChar,
+  coverFallbackStyle,
+  fetchCapacity,
+  fetchRoomDetail,
+  fetchStreams,
+  streamCoverUrl,
+  type CapacityInfo,
+  type ChatMessage,
+  type LiveStream,
+  type RoomDetail,
+  type RtcStatus,
+  type RtcTone,
+} from './api';
+import { startLatencyMonitor, type LatencySample } from './latency';
+import { navigate, roomPath, scrollToSection, useRoute } from './router';
+import { RoomPage } from './room';
 
-const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
-type ChatMessage = { id: number; username: string; content: string; createdAt: string };
-type LiveStream = {
-  id: number;
-  title: string;
-  username: string;
-  is_live: boolean;
-  whepPath: string;
-  transport: 'WebRTC';
-  coverUrl?: string | null;
-};
-type RtcTone = 'idle' | 'info' | 'ok' | 'warn' | 'error';
-type RtcStatus = { text: TextMessage; tone: RtcTone };
 type LastCreatedStream = { id: number; title: string; coverUrl: string | null };
 type VideoElementWithFrames = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: () => void) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
 };
-
-/** Cover URL as returned by the backend (`/covers/...`), resolved for <img>. */
-function streamCoverUrl(stream: LiveStream): string {
-  return resolveAssetUrl(API, stream.coverUrl || '');
-}
-
-/** Deterministic gradient for streams without a cover (title fallback). */
-function coverFallbackStyle(stream: LiveStream): React.CSSProperties {
-  const hue = (Number(stream.id) * 47) % 360;
-  return {
-    background: `linear-gradient(135deg, hsl(${hue} 68% 40%), hsl(${(hue + 58) % 360} 72% 26%))`,
-  };
-}
-
-/** First visible character of the title, used inside the gradient fallback. */
-function titleInitial(title: string): string {
-  const trimmed = String(title || '').trim();
-  return trimmed ? Array.from(trimmed)[0] : t('brand.mark');
-}
-
-function coverFallbackChar(stream: LiveStream): string {
-  return titleInitial(stream.title);
-}
 
 /**
  * Wait until ICE gathering completes so the offer posted to WHEP already contains
@@ -150,13 +132,16 @@ function describeWhepFailure(status: number, body: string): LocalizedError {
 }
 
 type PublishSource = 'camera' | 'screen';
+// 1080p/60fps is offered only when GET /api/capacity reports allow1080p60=true.
+// The existing presets stay unchanged so low-end servers keep the old behavior.
 const PUBLISH_RESOLUTIONS = [
+  { key: '1080p', width: 1920, height: 1080, labelKey: 'publish.res1080p' },
   { key: '720p', width: 1280, height: 720, labelKey: 'publish.res720p' },
   { key: '540p', width: 960, height: 540, labelKey: 'publish.res540p' },
   { key: '360p', width: 640, height: 360, labelKey: 'publish.res360p' },
 ] as const;
 type PublishResolutionKey = (typeof PUBLISH_RESOLUTIONS)[number]['key'];
-const PUBLISH_FPS = [30, 24, 15] as const;
+const PUBLISH_FPS = [60, 30, 24, 15] as const;
 const PUBLISH_MEDIA_ERRORS = ['NotAllowedError', 'NotFoundError', 'NotReadableError', 'OverconstrainedError', 'NotSupportedError', 'SecurityError'];
 
 /** One active browser-publish session; null when nothing is being published. */
@@ -269,6 +254,9 @@ function live2dPhaseLabel(phase: string): I18nKey {
 }
 
 function App() {
+  const route = useRoute();
+  const roomId = route.name === 'room' ? route.streamId : null;
+  const inRoom = roomId !== null;
   const [streams, setStreams] = useState<LiveStream[]>([]);
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
@@ -299,6 +287,18 @@ function App() {
   const [coverBusy, setCoverBusy] = useState(false);
   const [coverError, setCoverError] = useState<TextMessage | null>(null);
   const [lastCreated, setLastCreated] = useState<LastCreatedStream | null>(null);
+  // Standalone room state (`/room/<id>`): detail, viewer count, latency and lifecycle.
+  const [roomDetail, setRoomDetail] = useState<RoomDetail | null>(null);
+  const [roomLoading, setRoomLoading] = useState(false);
+  const [roomNotFound, setRoomNotFound] = useState(false);
+  const [roomEnded, setRoomEnded] = useState(false);
+  const [roomError, setRoomError] = useState<TextMessage | null>(null);
+  const [roomRetryNonce, setRoomRetryNonce] = useState(0);
+  const [viewerCount, setViewerCount] = useState<number | null>(null);
+  const [latency, setLatency] = useState<LatencySample | null>(null);
+  // Server capacity from GET /api/capacity; null = unknown, keep the legacy options.
+  const [capacity, setCapacity] = useState<CapacityInfo | null>(null);
+  const roomLive = !!roomDetail && roomDetail.is_live && !roomEnded;
   // Live2D loader input (persisted between visits).
   const [live2dInput, setLive2dInput] = useState(() => localStorage.getItem('live2d.modelUrl') || '');
   const live2dState = useLive2DState();
@@ -313,7 +313,6 @@ function App() {
   const chatSocket = useRef<WebSocket | null>(null);
   const playbackTeardown = useRef<(() => void) | null>(null);
   const rtcToneRef = useRef<RtcTone>('idle');
-  const chatEnd = useRef<HTMLDivElement>(null);
 
   /** Show one or more translatable message lines (no parts clears the notice). */
   const showMessage = (...parts: Array<TextMessage | null | undefined>) => {
@@ -322,10 +321,7 @@ function App() {
 
   async function load() {
     try {
-      const r = await fetch(`${API}/api/streams`, { cache: 'no-store' });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      setStreams(Array.isArray(data) ? data.filter((s: LiveStream) => s.is_live === true && !!s.whepPath) : []);
+      setStreams(await fetchStreams());
     } catch (e: any) {
       showMessage(msg('msg.streamListFailed', {
         detail: e?.message ? rawText(String(e.message)) : msg('msg.checkBackend'),
@@ -333,14 +329,44 @@ function App() {
     }
   }
 
+  // Lobby polling: only while the lobby is mounted and the tab is visible. The room
+  // page has its own lighter refresh, so an open room never polls the lobby list.
   useEffect(() => {
+    if (inRoom) return;
     void load();
-    const timer = window.setInterval(() => void load(), 10000);
-    return () => window.clearInterval(timer);
-  }, []);
+    let timer: number | undefined;
+    const stop = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    const start = () => {
+      stop();
+      timer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') void load();
+      }, 10000);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void load();
+        start();
+      } else {
+        stop();
+      }
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [inRoom]);
 
-  // Keep the Live2D canvas attached to the panel when it mounts.
+  // Keep the Live2D canvas attached to the panel when it mounts. Without a loaded
+  // model there is nothing to render, so no Live2D initialisation is triggered.
   useEffect(() => {
+    if (!live2dState.hasModel) return;
     attachLive2DPanel(live2dHost.current);
   }, [live2dState.hasModel]);
 
@@ -348,6 +374,131 @@ function App() {
   useEffect(() => {
     getLive2DCanvas()?.setAttribute('aria-label', t('live2d.canvasLabel'));
   }, [lang]);
+
+  // Server capacity gates 1080p/60fps for the publish card. A missing endpoint is
+  // treated as "unknown" and must not disable any of the existing presets.
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchCapacity(controller.signal)
+      .then((info) => { if (!controller.signal.aborted) setCapacity(info); })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+
+  // If the server reports it cannot sustain 1080p/60fps, move a stale selection back
+  // to 720p/30 before the publisher constraints are built.
+  useEffect(() => {
+    if (capacity?.allow1080p60 !== false) return;
+    setPublishResolution((current) => (current === '1080p' ? '720p' : current));
+    setPublishFps((current) => (current === 60 ? 30 : current));
+  }, [capacity]);
+
+  // Browser tab title reflects the room that is open.
+  useEffect(() => {
+    document.title = roomDetail ? t('room.documentTitle', { title: roomDetail.title }) : t('app.title');
+  }, [roomDetail, lang]);
+
+  // Scroll to the top when switching between the lobby and a room.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [roomId]);
+
+  // Route -> room detail. The lobby entry is used as an instant placeholder and then
+  // GET /api/streams/:id refreshes it (and brings the authoritative viewer count).
+  useEffect(() => {
+    if (roomId === null) {
+      setRoomDetail(null);
+      setRoomError(null);
+      setRoomNotFound(false);
+      setRoomEnded(false);
+      setRoomLoading(false);
+      setViewerCount(null);
+      setLatency(null);
+      return;
+    }
+    const cached = streams.find((stream) => stream.id === roomId) ?? null;
+    setRoomDetail(cached);
+    setRoomError(null);
+    setRoomNotFound(false);
+    setRoomEnded(false);
+    setViewerCount(cached?.viewers ?? null);
+    setLatency(null);
+    setRoomLoading(true);
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const result = await fetchRoomDetail(roomId, controller.signal);
+        if (controller.signal.aborted) return;
+        if (result.status === 'ok') {
+          setRoomDetail(result.stream);
+          setViewerCount(result.stream.viewers ?? null);
+          setRoomEnded(!result.stream.is_live);
+        } else if (result.status === 'not-found') {
+          setRoomEnded(true);
+          if (!cached) {
+            setRoomDetail(null);
+            setRoomNotFound(true);
+          }
+        } else if (!cached) {
+          setRoomError(msg('room.loadFailed'));
+        }
+      } catch (error: any) {
+        if (error?.name === 'AbortError' || controller.signal.aborted) return;
+        if (!cached) setRoomError(msg('room.loadFailed'));
+      } finally {
+        if (!controller.signal.aborted) setRoomLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [roomId, roomRetryNonce]);
+
+  // While a room is open, refresh its detail (viewers + end of stream) only when the
+  // tab is visible; leaving the room clears the interval.
+  useEffect(() => {
+    if (roomId === null) return;
+    let disposed = false;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void fetchRoomDetail(roomId)
+        .then((result) => {
+          if (disposed || !result) return;
+          if (result.status === 'ok') {
+            setRoomDetail((previous) => (previous && previous.id === roomId
+              ? { ...previous, ...result.stream }
+              : result.stream));
+            setViewerCount(result.stream.viewers ?? null);
+            if (!result.stream.is_live) {
+              // Ended rooms stay open for the "已下播" screen; stop refreshing them.
+              setRoomEnded(true);
+              window.clearInterval(timer);
+            }
+          } else if (result.status === 'not-found') {
+            setRoomEnded(true);
+            window.clearInterval(timer);
+          }
+        })
+        .catch(() => undefined);
+    }, 12000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [roomId]);
+
+  // Only a live room that is actually open gets a WHEP player/chat session.
+  useEffect(() => {
+    if (roomId === null || !token || !roomLive) {
+      setChatStreamId(null);
+      return;
+    }
+    setChatStreamId(roomId);
+  }, [roomId, token, roomLive]);
+
+  // Explain the disabled chat input when the host has stopped publishing.
+  useEffect(() => {
+    if (!inRoom || !token || roomLive) return;
+    setChatState(msg('chat.roomEnded'));
+  }, [inRoom, token, roomLive]);
 
   // WebRTC playback uses WHEP (SDP offer/answer) instead of HLS or HTTP-FLV.
   useEffect(() => {
@@ -368,6 +519,7 @@ function App() {
     let stalled = false;
     const controller = new AbortController();
     const remoteStream = new MediaStream();
+    let latencyStop: (() => void) | null = null;
 
     const status = (text: TextMessage, tone: RtcTone) => {
       if (closed) return;
@@ -382,6 +534,9 @@ function App() {
       if (closed) return;
       closed = true;
       controller.abort();
+      latencyStop?.();
+      latencyStop = null;
+      setLatency(null);
       window.clearTimeout(mediaTimer);
       window.clearInterval(stallTimer);
       if (frameElement?.cancelVideoFrameCallback && videoFrameHandle) {
@@ -409,6 +564,7 @@ function App() {
 
     if (!streamId || !authToken) {
       playbackTeardown.current = null;
+      setLatency(null);
       status(authToken ? msg('rtc.idlePicking') : msg('rtc.idleSignedOut'), 'idle');
       return;
     }
@@ -424,6 +580,12 @@ function App() {
 
     pc.addTransceiver('video', { direction: 'recvonly' });
     pc.addTransceiver('audio', { direction: 'recvonly' });
+
+    // Sample getStats once per second for the "延迟≈Xms" chip. The monitor pauses
+    // itself on hidden tabs and is stopped by release() when the viewer leaves.
+    latencyStop = startLatencyMonitor(pc, (sample) => {
+      if (!closed) setLatency(sample);
+    });
 
     // End-of-stream watchdog. SRS can keep a WHEP PeerConnection open after the publisher
     // stops, so no track-end or connection-state event arrives. A MediaStream's currentTime
@@ -625,13 +787,30 @@ function App() {
     let disposed = false;
     setChatMessages([]);
     setChatState(msg('chat.connecting'));
+    // Viewer counter updates arrive over the chat channel (ready + broadcast events).
+    const applyViewers = (value: unknown) => {
+      const count = Number(value);
+      if (!Number.isFinite(count) || count < 0) return;
+      setViewerCount(count);
+      setStreams((previous) => previous.map((stream) => (
+        stream.id === chatStreamId ? { ...stream, viewers: count } : stream
+      )));
+      setRoomDetail((previous) => (previous && previous.id === chatStreamId
+        ? { ...previous, viewers: count }
+        : previous));
+    };
     socket.onopen = () => { if (!disposed) socket.send(JSON.stringify({ type: 'auth', token, streamId: chatStreamId })); };
     socket.onmessage = (event) => {
       if (disposed) return;
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'ready') { setChatMessages(data.messages || []); setChatState(msg('chat.connected')); }
-        else if (data.type === 'message') setChatMessages((prev) => [...prev, data.message].slice(-100));
+        if (data.type === 'ready') {
+          setChatMessages(data.messages || []);
+          setChatState(msg('chat.connected'));
+          if (data.viewers !== undefined && data.viewers !== null) applyViewers(data.viewers);
+        } else if (data.type === 'viewers') {
+          if (Number(data.streamId) === Number(chatStreamId)) applyViewers(data.viewers);
+        } else if (data.type === 'message') setChatMessages((prev) => [...prev, data.message].slice(-100));
         else if (data.type === 'warning' || data.type === 'error') setChatState(data.message ? backendText(String(data.message)) : msg('chat.error'));
       } catch { /* Ignore malformed server messages. */ }
     };
@@ -645,8 +824,6 @@ function App() {
       if (chatSocket.current === socket) chatSocket.current = null;
     };
   }, [chatStreamId, token]);
-
-  useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [chatMessages]);
 
   // Keep the latest publish teardown reachable from the unmount cleanup, and release
   // the camera/screen capture whenever this page is torn down.
@@ -1115,14 +1292,14 @@ function App() {
     }
   }
 
-  function joinRoom(stream: LiveStream) {
-    if (!token) { showMessage(msg('msg.watchNeedLogin')); return; }
-    setChatStreamId(stream.id);
-    setChatState(msg('chat.joining', { title: stream.title }));
+  /** Lobby live card click: open the standalone room (login is prompted inside it). */
+  function enterRoom(stream: LiveStream) {
+    if (roomId === stream.id) return;
+    navigate(roomPath(stream.id));
   }
 
+  /** Room "back to lobby": tear the WHEP/chat session down immediately, then route. */
   function leaveRoom() {
-    // Closes the PeerConnection and detaches the video immediately, then resets state.
     playbackTeardown.current?.();
     playbackTeardown.current = null;
     chatSocket.current?.close();
@@ -1132,6 +1309,23 @@ function App() {
       video.current.muted = false;
     }
     setChatStreamId(null);
+    setRoomEnded(false);
+    navigate('/');
+  }
+
+  /** Top-nav target while a room is open: return to the lobby, then scroll to a card. */
+  function handleSectionNav(section: string) {
+    return (event: React.MouseEvent<HTMLAnchorElement>) => {
+      if (!inRoom) return;
+      event.preventDefault();
+      navigate('/');
+      scrollToSection(section);
+    };
+  }
+
+  function goLogin() {
+    navigate('/');
+    scrollToSection('auth');
   }
 
   function logout() {
@@ -1163,8 +1357,6 @@ function App() {
     setLive2DVisible(!live2dState.visible);
   }
 
-  const selected = streams.find((stream) => stream.id === chatStreamId);
-  const canRetry = !!chatStreamId && (rtcStatus.tone === 'error' || rtcStatus.tone === 'warn');
   const live2dLoading = live2dState.phase === 'core' || live2dState.phase === 'model';
   const live2dTone: RtcTone = live2dState.phase === 'ready'
     ? 'ok'
@@ -1173,21 +1365,40 @@ function App() {
       : live2dLoading
         ? 'info'
         : 'idle';
+  const canConnectRoom = roomId !== null && !!token && roomLive;
+  const canChatRoom = roomId !== null && !!token && roomLive;
+  const canRetryRoom = canConnectRoom && (rtcStatus.tone === 'error' || rtcStatus.tone === 'warn');
+  const capacityLimited = capacity?.allow1080p60 === false;
+  const capacityReason = capacity
+    && (capacity.cpuCores !== null || capacity.memoryFreeMb !== null || capacity.activeRooms !== null)
+    ? t('publish.capacityReason', {
+      cores: capacity.cpuCores ?? '—',
+      freeMb: capacity.memoryFreeMb === null ? '—' : Math.round(capacity.memoryFreeMb),
+      rooms: capacity.activeRooms ?? '—',
+    })
+    : (capacity?.reason || t('publish.capacityReasonUnknown'));
 
   return (
     <div className="app">
       <header className="topbar">
         <div className="topbar-inner">
-          <a className="brand" href="#top" aria-label={t('brand.home')}>
+          <a
+            className="brand"
+            href="#top"
+            aria-label={t('brand.home')}
+            onClick={(event) => {
+              if (!inRoom) return;
+              event.preventDefault();
+              navigate('/');
+            }}
+          >
             <span className="brand-mark" aria-hidden="true">{t('brand.mark')}</span>
             <span className="brand-text">{t('brand.name')}<small>{t('brand.sub')}</small></span>
           </a>
           <nav className="topnav" aria-label={t('nav.label')}>
-            <a href="#lobby">{t('nav.lobby')}</a>
-            <a href="#watch">{t('nav.watch')}</a>
-            <a href="#publish">{t('nav.publish')}</a>
-            <a href="#live2d">{t('nav.live2d')}</a>
-            <a href="#chat">{t('nav.chat')}</a>
+            <a href="#lobby" onClick={handleSectionNav('lobby')}>{t('nav.lobby')}</a>
+            <a href="#publish" onClick={handleSectionNav('publish')}>{t('nav.publish')}</a>
+            <a href="#live2d" onClick={handleSectionNav('live2d')}>{t('nav.live2d')}</a>
           </nav>
           <div className="top-actions">
             <div className="lang-switch" role="group" aria-label={t('lang.switch')}>
@@ -1214,12 +1425,53 @@ function App() {
             </span>
             {token
               ? <button type="button" className="ghost small" onClick={logout}>{t('topbar.logout')}</button>
-              : <a className="button small" href="#auth">{t('topbar.loginRegister')}</a>}
+              : (
+                <a
+                  className="button small"
+                  href="#auth"
+                  onClick={(event) => {
+                    if (!inRoom) return;
+                    event.preventDefault();
+                    goLogin();
+                  }}
+                >
+                  {t('topbar.loginRegister')}
+                </a>
+              )}
           </div>
         </div>
       </header>
 
-      <main className="page" id="top">
+      {inRoom ? (
+        <RoomPage
+          roomId={roomId as number}
+          detail={roomDetail}
+          loading={roomLoading}
+          notFound={roomNotFound && !roomDetail}
+          loadError={roomError}
+          ended={roomEnded}
+          token={token}
+          viewers={viewerCount}
+          latency={latency}
+          videoRef={video}
+          rtcStatus={rtcStatus}
+          canConnect={canConnectRoom}
+          canRetry={canRetryRoom}
+          canChat={canChatRoom}
+          chat={{
+            messages: chatMessages,
+            state: chatState,
+            input: chatInput,
+            setInput: setChatInput,
+            submit: sendChat,
+          }}
+          onBack={leaveRoom}
+          onLogin={goLogin}
+          onRetryLoad={() => setRoomRetryNonce((value) => value + 1)}
+          onRetryConnect={() => setRetryNonce((value) => value + 1)}
+        />
+      ) : (
+        <main className="page" id="top">
         <section className="hero">
           <div className="hero-copy">
             <span className="eyebrow">{t('hero.eyebrow')}</span>
@@ -1283,45 +1535,7 @@ function App() {
           <pre className="message" role="status" aria-live="polite">{message.map(translateMessage).join('\n')}</pre>
         )}
 
-        <div className="main-grid">
-          <section className="panel watch-panel" id="watch">
-            <div className="panel-head">
-              <div>
-                <span className="eyebrow">{t('watch.eyebrow')}</span>
-                <h2>{t('watch.title')}</h2>
-              </div>
-              <span className={`status-dot ${rtcStatus.tone}`}>
-                <i aria-hidden="true" />{selected ? selected.title : t('watch.waitingRoom')}
-              </span>
-            </div>
-            <div className={`player ${chatStreamId ? 'has-stream' : ''}`}>
-              <video
-                ref={video}
-                controls
-                autoPlay
-                playsInline
-                aria-label={t('watch.videoLabel')}
-                onClick={() => { void video.current?.play().catch(() => undefined); }}
-              />
-              {!chatStreamId && (
-                <div className="player-empty">
-                  <span className="player-empty-icon" aria-hidden="true">▶</span>
-                  <p>{token ? t('watch.emptyPick') : t('watch.emptyLogin')}</p>
-                </div>
-              )}
-            </div>
-            <div className="playrow">
-              <p className={`hint rtc-status ${rtcStatus.tone}`} role="status" aria-live="polite">{translateMessage(rtcStatus.text)}</p>
-              {canRetry && (
-                <button type="button" className="secondary small" onClick={() => setRetryNonce((value) => value + 1)}>
-                  {t('watch.reconnect')}
-                </button>
-              )}
-            </div>
-            <p className="hint">{t('watch.hint')}</p>
-          </section>
-
-          <aside className="panel lobby-panel" id="lobby">
+        <section className="panel lobby-panel" id="lobby">
             <div className="panel-head">
               <div>
                 <span className="eyebrow">{t('lobby.eyebrow')}</span>
@@ -1346,7 +1560,7 @@ function App() {
                       type="button"
                       className="live-card"
                       key={stream.id}
-                      onClick={() => joinRoom(stream)}
+                      onClick={() => enterRoom(stream)}
                       aria-label={t('lobby.watchRoom', { title: stream.title })}
                     >
                       <div className="live-cover" style={coverFallbackStyle(stream)}>
@@ -1364,6 +1578,9 @@ function App() {
                       <div className="live-meta">
                         <b>{stream.title}</b>
                         <span className="live-owner">{t('lobby.owner', { name: stream.username })}</span>
+                        {stream.viewers !== null && stream.viewers !== undefined && (
+                          <span className="live-viewers">{t('lobby.viewers', { count: stream.viewers })}</span>
+                        )}
                         <span className="live-cta">{token ? t('lobby.cta') : t('lobby.ctaSignedOut')}</span>
                       </div>
                     </button>
@@ -1371,8 +1588,7 @@ function App() {
                 })}
               </div>
             )}
-          </aside>
-        </div>
+        </section>
 
         <section className="panel publish-panel" id="publish">
           <div className="panel-head">
@@ -1394,15 +1610,37 @@ function App() {
                 </label>
                 <label className="field">{t('publish.resolution')}
                   <select value={publishResolution} disabled={publishing} onChange={(e) => setPublishResolution(e.target.value as PublishResolutionKey)}>
-                    {PUBLISH_RESOLUTIONS.map((item) => <option key={item.key} value={item.key}>{t(item.labelKey)}</option>)}
+                    {PUBLISH_RESOLUTIONS.map((item) => {
+                      const disabled = capacityLimited && item.key === '1080p';
+                      return (
+                        <option key={item.key} value={item.key} disabled={disabled}>
+                          {t(item.labelKey)}{disabled ? t('publish.capacityOptionDisabled') : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </label>
                 <label className="field">{t('publish.fps')}
                   <select value={publishFps} disabled={publishing} onChange={(e) => setPublishFps(Number(e.target.value))}>
-                    {PUBLISH_FPS.map((value) => <option key={value} value={value}>{value} fps</option>)}
+                    {PUBLISH_FPS.map((value) => {
+                      const disabled = capacityLimited && value === 60;
+                      return (
+                        <option key={value} value={value} disabled={disabled}>
+                          {value} fps{disabled ? t('publish.capacityOptionDisabled') : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </label>
               </div>
+              {capacityLimited && (
+                <p className="hint warn-text" role="status" aria-live="polite">
+                  {t('publish.capacityLimited', { reason: capacityReason })}
+                </p>
+              )}
+              {!capacityLimited && capacity && capacity.allow1080p60 === true && (
+                <p className="hint">{t('publish.capacityAllowed')}</p>
+              )}
               <label className="field">{t('publish.titleField')}
                 <input
                   value={publishTitle}
@@ -1520,8 +1758,7 @@ function App() {
           </div>
         </section>
 
-        <div className="lower-grid">
-          <section className="panel live2d-panel" id="live2d">
+        <section className="panel live2d-panel" id="live2d">
             <div className="panel-head">
               <div>
                 <span className="eyebrow">{t('live2d.eyebrow')}</span>
@@ -1571,48 +1808,15 @@ function App() {
               )}
             </div>
             <p className="hint">{t('live2d.footerHint')}</p>
-          </section>
-
-          <section className="panel chat-panel" id="chat">
-            <div className="panel-head">
-              <div>
-                <span className="eyebrow">{t('chat.eyebrow')}</span>
-                <h2>{t('chat.title')}</h2>
-                <p className="hint">{selected ? translateMessage(msg('chat.currentRoom', { title: selected.title })) : ''}{translateMessage(chatState)}</p>
-              </div>
-              {chatStreamId && <button type="button" className="secondary small" onClick={leaveRoom}>{t('chat.leave')}</button>}
-            </div>
-            <div className="chat-messages">
-              {chatMessages.length === 0
-                ? <p className="hint">{t('chat.empty')}</p>
-                : chatMessages.map((m, i) => (
-                  <div className="chat-line" key={`${m.id}-${i}`}>
-                    <b>{m.username}</b>
-                    <span>{m.content}</span>
-                    <time>{new Date(m.createdAt).toLocaleTimeString()}</time>
-                  </div>
-                ))}
-              <div ref={chatEnd} />
-            </div>
-            <form className="chat-form" onSubmit={sendChat}>
-              <input
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                maxLength={500}
-                placeholder={token ? t('chat.inputPlaceholder') : t('chat.inputPlaceholderSignedOut')}
-                disabled={!token || !chatStreamId}
-              />
-              <button disabled={!token || !chatStreamId}>{t('chat.send')}</button>
-            </form>
-          </section>
-        </div>
+        </section>
 
         <footer className="footer">
           <span>{t('footer.brand')}</span>
           <span>{t('footer.tech')}</span>
           <span>{t('footer.notice')}</span>
         </footer>
-      </main>
+        </main>
+      )}
     </div>
   );
 }

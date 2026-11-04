@@ -14,6 +14,8 @@ import { createPluginManager } from './plugin-manager.js';
 import { mysqlBoolean } from './mysql-utils.js';
 import { recordingApiBaseForRequest, recordingBelongsToStreams } from './recordings-utils.js';
 import { CoverValidationError, coverFilenameFromUrl, saveCoverImage } from './covers-utils.js';
+import { createCapacityProvider } from './capacity.js';
+import { createViewerRegistry } from './viewers.js';
 
 dotenv.config();
 
@@ -114,6 +116,14 @@ async function ensureColumn(table, column, definition) {
   );
   if (!Number(rows[0].n)) await db.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
+
+async function ensureIndex(table, indexName, columns) {
+  const [rows] = await db.query(
+    'SELECT COUNT(*) AS n FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=?',
+    [table, indexName],
+  );
+  if (!Number(rows[0].n)) await db.query(`ALTER TABLE ${table} ADD INDEX ${indexName} (${columns})`);
+}
 // Migrations for databases created by earlier v0.4 builds.
 await ensureColumn('users', 'is_banned', 'BOOLEAN NOT NULL DEFAULT FALSE');
 await ensureColumn('users', 'banned_at', 'DATETIME NULL');
@@ -122,6 +132,10 @@ await ensureColumn('streams', 'is_blocked', 'BOOLEAN NOT NULL DEFAULT FALSE');
 await ensureColumn('streams', 'block_reason', 'VARCHAR(255) NULL');
 await ensureColumn('streams', 'deleted_at', 'DATETIME NULL');
 await ensureColumn('streams', 'cover_url', 'TEXT NULL');
+// Lobby/live-room queries filter on is_live and order by created_at; without an
+// index every public request is a full table scan. CREATE INDEX once, then the
+// migration is a no-op on later boots.
+await ensureIndex('streams', 'idx_streams_live_created', 'is_live, created_at');
 
 await db.query(`CREATE TABLE IF NOT EXISTS chat_messages (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -154,6 +168,31 @@ await db.query(`CREATE TABLE IF NOT EXISTS plugin_settings (
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
+
+// Live viewer counts are kept in process memory: SRS on_play/on_stop callbacks
+// mutate a Set per room, so GET /api/streams never queries chat/viewer tables.
+const viewerRegistry = createViewerRegistry();
+function streamViewers(streamId) {
+  return viewerRegistry.count(streamId);
+}
+function broadcastViewers(streamId, viewers) {
+  broadcastChat(streamId, { type: 'viewers', streamId: Number(streamId), viewers });
+}
+
+// GET /api/capacity samples the host at most once per 2s and reuses the last
+// result for all clients polling the publish settings page.
+const capacityProvider = createCapacityProvider({
+  readActiveRooms: async () => {
+    const [[row]] = await db.query('SELECT COUNT(*) AS n FROM streams WHERE is_live=TRUE AND deleted_at IS NULL');
+    return Number(row?.n || 0);
+  },
+});
+
+app.get('/api/capacity', asyncRoute(async (_req, res) => {
+  const capacity = await capacityProvider.get();
+  res.setHeader('Cache-Control', 'public, max-age=2');
+  return res.json(capacity);
+}));
 
 async function auth(req, res, next) {
   try {
@@ -368,6 +407,10 @@ app.post('/api/srs/on_unpublish', srsHookAuth, asyncRoute(async (req, res) => {
     if (rows.length) {
       console.info(`[srs] WebRTC unpublish accepted streamId=${rows[0].id} userId=${rows[0].user_id}`);
       const row = rows[0];
+      // The room is gone: drop every counted viewer before closing chat so a
+      // later reconnect starts from zero instead of a stale headcount.
+      viewerRegistry.clear(row.id);
+      broadcastViewers(row.id, 0);
       closeChatRoom(row.id, '直播已结束');
       await plugins.emit('stream.unpublished', { stream: { id: row.id, title: row.title, userId: row.user_id, username: row.username } });
     }
@@ -377,13 +420,35 @@ app.post('/api/srs/on_unpublish', srsHookAuth, asyncRoute(async (req, res) => {
 
 app.post('/api/srs/on_play', srsHookAuth, asyncRoute(async (req, res) => {
   const streamKey = String(req.body?.stream || '');
+  const clientId = String(req.body?.client_id ?? '').trim();
   const claims = verifyRtcCallback(req, 'play', streamKey);
   if (!claims) return res.status(403).json({ code: 1, error: 'invalid or expired WebRTC playback token' });
   const [[stream]] = await db.query('SELECT s.id,s.user_id,s.is_live,s.is_blocked,s.deleted_at,u.is_banned FROM streams s JOIN users u ON u.id=s.user_id WHERE s.stream_key=? LIMIT 1', [streamKey]);
   if (!stream || Number(stream.id) !== Number(claims.streamId) || !mysqlBoolean(stream.is_live) || stream.is_blocked || stream.deleted_at || stream.is_banned) return res.status(403).json({ code: 1, error: 'stream is unavailable' });
+  // Only admitted WHEP viewers are counted, and the Set makes repeated hooks
+  // for the same SRS client id idempotent.
+  if (clientId) {
+    const { changed, viewers } = viewerRegistry.add(stream.id, clientId);
+    if (changed) {
+      console.info(`[srs] viewer joined streamId=${stream.id} viewers=${viewers}`);
+      broadcastViewers(stream.id, viewers);
+    }
+  }
   return res.json({ code: 0 });
 }));
-app.post('/api/srs/on_stop', srsHookAuth, (_req, res) => res.json({ code: 0 }));
+
+app.post('/api/srs/on_stop', srsHookAuth, asyncRoute(async (req, res) => {
+  // SRS sends on_stop for both play and publish clients; publishing clients are
+  // not in the viewer registry, so removing them is a no-op.
+  const clientId = String(req.body?.client_id ?? '').trim();
+  if (clientId) {
+    for (const { streamId, viewers } of viewerRegistry.removeClient(clientId)) {
+      console.info(`[srs] viewer left streamId=${streamId} viewers=${viewers}`);
+      broadcastViewers(Number(streamId), viewers);
+    }
+  }
+  return res.json({ code: 0 });
+}));
 
 app.get('/api/streams', asyncRoute(async (_req, res) => {
   const [rows] = await db.query('SELECT s.id,s.title,s.is_live,s.cover_url,s.created_at,u.username FROM streams s JOIN users u ON u.id=s.user_id WHERE s.deleted_at IS NULL AND s.is_blocked=FALSE AND s.is_live=TRUE AND u.is_banned=FALSE ORDER BY s.created_at DESC LIMIT 100');
@@ -391,6 +456,7 @@ app.get('/api/streams', asyncRoute(async (_req, res) => {
     ...stream,
     is_live: mysqlBoolean(stream.is_live),
     coverUrl: coverUrl || null,
+    viewers: streamViewers(stream.id),
     whepPath: `/api/streams/${stream.id}/whep`,
     transport: 'WebRTC',
   })));
@@ -441,6 +507,29 @@ app.get('/api/streams/mine', auth, asyncRoute(async (req, res) => {
     publishPath: `/api/streams/${row.id}/whip`,
     whepPath: `/api/streams/${row.id}/whep`,
   })));
+}));
+
+// Public live-room detail used by the Web/Android room pages. Registered after
+// /api/streams/mine so the literal route keeps precedence over :id.
+// 200 with is_live=false is returned for an existing room that has ended, so
+// clients can show a "直播已结束" state; unavailable rooms still 404.
+app.get('/api/streams/:id', asyncRoute(async (req, res) => {
+  const streamId = Number(req.params.id);
+  if (!Number.isSafeInteger(streamId) || streamId < 1) return res.status(400).json({ error: '直播编号无效' });
+  const [rows] = await db.query(
+    'SELECT s.id,s.title,s.is_live,s.cover_url,s.created_at,u.username FROM streams s JOIN users u ON u.id=s.user_id WHERE s.id=? AND s.deleted_at IS NULL AND s.is_blocked=FALSE AND u.is_banned=FALSE LIMIT 1',
+    [streamId],
+  );
+  if (!rows.length) return res.status(404).json({ error: '直播不存在或不可用' });
+  const { cover_url: coverUrl, ...stream } = rows[0];
+  return res.json({
+    ...stream,
+    is_live: mysqlBoolean(stream.is_live),
+    coverUrl: coverUrl || null,
+    viewers: streamViewers(stream.id),
+    whepPath: `/api/streams/${stream.id}/whep`,
+    transport: 'WebRTC',
+  });
 }));
 
 app.patch('/api/streams/:id/status', auth, (_req, res) => {
@@ -497,7 +586,12 @@ wss.on('connection', (ws) => {
         const room = chatRooms.get(String(streamId)) || new Set();
         room.add(ws); chatRooms.set(String(streamId), room);
         const [history] = await db.query('SELECT id,username,content,created_at AS createdAt FROM chat_messages WHERE stream_id=? ORDER BY id DESC LIMIT 50', [streamId]);
-        sendWs(ws, { type: 'ready', streamId, messages: history.reverse() });
+        const viewers = streamViewers(streamId);
+        sendWs(ws, { type: 'ready', streamId, messages: history.reverse(), viewers });
+        // Keep every open room page in sync even if its count message was
+        // missed during a reconnect: the ready handshake is followed by one
+        // authoritative viewers broadcast.
+        broadcastViewers(streamId, viewers);
         return;
       }
       if (message.type !== 'chat' || typeof message.content !== 'string') return;
@@ -567,7 +661,11 @@ app.patch('/api/admin/streams/:id/block', adminAuth, asyncRoute(async (req, res)
   if (!rows.length) return res.status(404).json({ error: '直播不存在' });
   await db.query('UPDATE streams SET is_blocked=?,block_reason=?,is_live=IF(?,FALSE,is_live) WHERE id=?', [blocked, blocked ? reason : null, blocked, req.params.id]);
   const disconnected = blocked ? await disconnectSrsClients(rows[0].stream_key) : 0;
-  if (blocked) closeChatRoom(req.params.id, '直播间已被管理员封禁');
+  if (blocked) {
+    viewerRegistry.clear(req.params.id);
+    broadcastViewers(req.params.id, 0);
+    closeChatRoom(req.params.id, '直播间已被管理员封禁');
+  }
   await writeAdminLog(req, blocked ? 'stream.block' : 'stream.unblock', 'stream', req.params.id, { reason, disconnected });
   res.json({ ok: true, blocked, disconnected });
 }));
@@ -576,6 +674,8 @@ app.delete('/api/admin/streams/:id', adminAuth, asyncRoute(async (req, res) => {
   if (!rows.length) return res.status(404).json({ error: '直播不存在' });
   await db.query('UPDATE streams SET deleted_at=NOW(),is_blocked=TRUE,is_live=FALSE,block_reason=COALESCE(block_reason,?) WHERE id=?', ['管理员删除', req.params.id]);
   const disconnected = await disconnectSrsClients(rows[0].stream_key);
+  viewerRegistry.clear(req.params.id);
+  broadcastViewers(req.params.id, 0);
   closeChatRoom(req.params.id, '直播间已删除');
   await writeAdminLog(req, 'stream.delete', 'stream', req.params.id, { disconnected, softDelete: true });
   res.json({ ok: true, disconnected, softDelete: true });

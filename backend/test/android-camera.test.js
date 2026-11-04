@@ -73,13 +73,16 @@ test('camera capture resources are stopped and preview bridge is cleared on stop
   assert.match(stream, /CameraPreviewBridge\.clear\(\)/);
 });
 
-test('broadcast page offers 720p/540p/360p and 30/24/15 fps settings persisted in SharedPreferences', () => {
+test('broadcast page offers v0.7.9 1080p/720p/540p/360p and 60/30/24/15 fps settings persisted in SharedPreferences', () => {
   const screen = activity();
   const settings = videoSettings();
+  assert.match(settings, /Resolution\("1080p", "1080p", 1920, 1080, 6_000_000\)/);
   assert.match(settings, /Resolution\("720p", "720p", 1280, 720, 2_000_000\)/);
   assert.match(settings, /Resolution\("540p", "540p", 960, 540, 1_200_000\)/);
   assert.match(settings, /Resolution\("360p", "360p", 640, 360, 800_000\)/);
-  assert.match(settings, /val FPS_OPTIONS: List<Int> = listOf\(30, 24, 15\)/);
+  assert.match(settings, /val FPS_OPTIONS: List<Int> = listOf\(60, 30, 24, 15\)/);
+  assert.match(settings, /const val HIGH_RESOLUTION_ID = "1080p"/);
+  assert.match(settings, /const val HIGH_FPS = 60/);
   assert.match(settings, /const val DEFAULT_RESOLUTION_ID = "720p"/);
   assert.match(settings, /const val DEFAULT_FPS = 24/);
   // Buttons reuse the existing actionButton style and are painted from the persisted selection.
@@ -98,7 +101,7 @@ test('broadcast page passes the selected quality to ScreenStreamService via Inte
   assert.match(screen, /private fun putVideoExtras\(intent: Intent\)/);
   assert.match(screen, /putExtra\(ScreenStreamService\.EXTRA_VIDEO_WIDTH, videoResolution\.width\)/);
   assert.match(screen, /putExtra\(ScreenStreamService\.EXTRA_VIDEO_HEIGHT, videoResolution\.height\)/);
-  assert.match(screen, /putExtra\(ScreenStreamService\.EXTRA_VIDEO_BITRATE, videoResolution\.bitrateBps\)/);
+  assert.match(screen, /putExtra\(ScreenStreamService\.EXTRA_VIDEO_BITRATE, VideoSettings\.effectiveBitrate\(videoResolution, videoFps\)\)/);
   assert.match(screen, /putExtra\(ScreenStreamService\.EXTRA_VIDEO_FPS, videoFps\)/);
   // Both the screen-capture and camera-capture Intents carry the same extras.
   assert.equal((screen.match(/putVideoExtras\(this\)/g) ?? []).length, 2);
@@ -130,12 +133,12 @@ test('ScreenStreamService applies settings: landscape camera, portrait screen, p
   assert.match(stream, /encoding\.maxFramerate = videoFps/);
 });
 
-test('Android package version is bumped to 0.7.7 (versionCode 19)', () => {
+test('Android package version is bumped to 0.7.9 (versionCode 21)', () => {
   const gradle = read('android/app/build.gradle.kts');
-  assert.match(gradle, /versionCode = 20/);
-  assert.match(gradle, /versionName = "0\.7\.8"/);
+  assert.match(gradle, /versionCode = 21/);
+  assert.match(gradle, /versionName = "0\.7\.9"/);
   // The in-app header shows the same version.
-  assert.match(activity(), /text = "v0\.7\.7"/);
+  assert.match(activity(), /text = "v0\.7\.9"/);
 });
 
 test('cover picking uses ACTION_OPEN_DOCUMENT and uploads a <=2MB imageData data URL', () => {
@@ -375,4 +378,147 @@ test('0.7.6 fixes are preserved in 0.7.7 (quality, z-order, init-before-addView,
   assert.match(screen, /"✨" to "nav\.live2d"/);
   const viewer = live2dViewer();
   assert.doesNotMatch(viewer, /PeerConnection|addTrack|VideoTrack/);
+});
+
+// ---------------------------------------------------------------------------
+// v0.7.9: 1080p60 capacity gating, standalone room, latency monitor, domain
+// ---------------------------------------------------------------------------
+
+test('v0.7.9 quality profiles: 1080p60 is the only high-bitrate profile and bitrate is clamped', () => {
+  const settings = videoSettings();
+  const stream = service();
+  // Resolution/FPS table plus the capacity-gated high profile.
+  assert.match(settings, /fun effectiveBitrate\(resolution: Resolution\?, fps: Int, requestedBps: Int = 0\): Int/);
+  assert.match(settings, /fun effectiveBitrate\(width: Int, height: Int, fps: Int, requestedBps: Int\): Int/);
+  assert.match(settings, /fun requiresHighCapacity\(resolution: Resolution\?, fps: Int\): Boolean/);
+  assert.match(settings, /const val LOW_BITRATE_CEILING = 2_000_000/);
+  assert.match(settings, /const val HIGH_BITRATE_CEILING = 8_000_000/);
+  // 1080p portrait/landscape + 60fps are valid service inputs; only that profile
+  // may exceed the low-bitrate ceiling.
+  assert.match(stream, /const val MAX_VIDEO_FPS = 60/);
+  assert.match(stream, /videoFps = if \(requestedFps in VideoSettings\.FPS_OPTIONS\) requestedFps else VideoSettings\.DEFAULT_FPS/);
+  assert.match(stream, /\.effectiveBitrate\(configuredWidth, configuredHeight, videoFps, requestedBitrate\)/);
+  assert.match(stream, /val clampedBitrate = VideoSettings\s*\n\s*\.effectiveBitrate\(width, height, fps, bitrateBps\)/);
+  assert.match(stream, /encoding\.maxBitrateBps = videoBitrateBps/);
+  assert.match(stream, /encoding\.maxFramerate = videoFps/);
+  // The broadcast page sends the clamped bitrate, not the raw 6 Mbps profile.
+  assert.match(activity(), /VideoSettings\.effectiveBitrate\(videoResolution, videoFps\)\)/);
+});
+
+test('v0.7.9 broadcast page checks GET /api/capacity and gates 1080p/60fps with a reason', () => {
+  const screen = activity();
+  const l10nSrc = l10n();
+  // Capacity is fetched when the broadcast page opens and again right before going live.
+  assert.match(screen, /private fun refreshCapacity\(force: Boolean = false, done: \(\(\) -> Unit\)\? = null\)/);
+  assert.match(screen, /apiRequest\("GET", "\/api\/capacity", null, false\)/);
+  assert.match(screen, /capacity\.optBooleanCompat\("allow1080p60"\)/);
+  assert.match(screen, /if \(index == 1\) refreshCapacity\(\)/);
+  assert.match(screen, /refreshCapacity\(force = true\) \{ startCaptureAfterCapacity\(\) \}/);
+  // 1080p and 60fps stay disabled unless the server reports allow1080p60=true.
+  assert.match(screen, /val allowHighQuality = capacityAllow1080p60 == true/);
+  assert.match(screen, /if \(option\.id == VideoSettings\.HIGH_RESOLUTION_ID\) button\.isEnabled = allowHighQuality/);
+  assert.match(screen, /if \(fps >= VideoSettings\.HIGH_FPS\) button\.isEnabled = allowHighQuality/);
+  // A disabled profile is explained, and a high-quality start is rejected + reset.
+  assert.match(screen, /private fun capacitySummaryText\(\)/);
+  assert.match(screen, /tr\("broadcast\.capacityDisabled", capacityLimitReason\(\)\)/);
+  assert.match(screen, /private fun resetHighQualitySelection\(\)/);
+  assert.match(screen, /tr\("broadcast\.highQualityBlocked", capacityLimitReason\(\)\)/);
+  for (const key of [
+    'broadcast.capacityTitle', 'broadcast.capacityAllowed', 'broadcast.capacityChecking',
+    'broadcast.capacityDisabled', 'broadcast.capacityUnavailable', 'broadcast.highQualityReset',
+    'broadcast.highQualityBlocked'
+  ]) {
+    assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
+  }
+});
+
+test('v0.7.9 lobby opens a standalone room page with detail API, viewers, WHEP and back navigation', () => {
+  const screen = activity();
+  // Tapping a lobby card (or its button) opens the full-screen room.
+  assert.match(screen, /setOnClickListener \{ openRoom\(stream\) \}/);
+  assert.match(screen, /actionButton\(tr\("lobby\.enter"\), true\) \{ openRoom\(stream\) \}/);
+  assert.match(screen, /private fun openRoom\(stream: LiveStream\)/);
+  assert.match(screen, /private fun renderRoom\(stream: LiveStream\)/);
+  assert.match(screen, /private fun leaveRoom\(message: String\? = null\)/);
+  // Full-screen: shell chrome is hidden while the room is open.
+  assert.match(screen, /private fun applyChromeVisibility\(\)/);
+  assert.match(screen, /headerView\?\.visibility = if \(inRoom\) View\.GONE else View\.VISIBLE/);
+  // Room contents: back, cover, title, host, WHEP player, latency, chat, viewers.
+  assert.match(screen, /actionButton\(tr\("room\.back"\), false\) \{ leaveRoom\(\) \}/);
+  assert.match(screen, /coverFrame\(stream\.title, stream\.coverUrl, large = true\)/);
+  assert.match(screen, /heading\(stream\.title\)/);
+  assert.match(screen, /tr\("room\.host", stream\.username\)/);
+  assert.match(screen, /attachLiveRenderer\(top, 210, stream\)/);
+  assert.match(screen, /tr\("room\.viewers", roomViewers\)/);
+  assert.match(screen, /private fun fillRoomChat\(\)/);
+  // Data: GET /api/streams/:id, WS viewers, ended/404 back to the lobby.
+  assert.match(screen, /apiRequest\("GET", "\/api\/streams\/\$\{stream\.id\}", null, false\)/);
+  assert.match(screen, /leaveRoom\(tr\("room\.notFound"\)\)/);
+  assert.match(screen, /leaveRoom\(tr\("room\.ended"\)\)/);
+  assert.match(screen, /"viewers" -> \{/);
+  assert.match(screen, /data\.optLong\("streamId", -1L\)/);
+  assert.match(screen, /roomViewers = viewers/);
+  // The hardware back gesture leaves the room before the activity.
+  assert.match(screen, /override fun onBackPressed\(\)/);
+  assert.match(screen, /if \(roomStream != null\) \{\s*\n\s*leaveRoom\(\)/);
+  // Live viewer counts arrive with the list and are rendered on lobby cards.
+  assert.match(screen, /viewers = item\.optInt\("viewers", -1\)/);
+});
+
+test('v0.7.9 room shows WHEP latency from 1s getStats jitter buffer + RTT and cleans up', () => {
+  const playback = playbackClient();
+  const screen = activity();
+  // 1 Hz getStats: jitterBufferDelay / jitterBufferEmittedCount + currentRoundTripTime.
+  assert.match(playback, /private const val STATS_INTERVAL_MS = 1_000L/);
+  assert.match(playback, /connection\.getStats\(object : RTCStatsCollectorCallback/);
+  assert.match(playback, /"jitterBufferDelay"/);
+  assert.match(playback, /"jitterBufferEmittedCount"/);
+  assert.match(playback, /"currentRoundTripTime"/);
+  assert.match(playback, /statsHandler\.postDelayed\(this, STATS_INTERVAL_MS\)/);
+  // The sampler is stopped on close and the listener is released.
+  assert.match(playback, /fun setLatencyListener\(listener: \(\(Int\) -> Unit\)\?\)/);
+  assert.match(playback, /fun close\(\) \{[\s\S]*?stopStatsMonitoring\(\)/);
+  assert.match(playback, /statsHandler\.removeCallbacksAndMessages\(null\)/);
+  // The room page displays localized "latency ≈ Xms" and drops it when leaving.
+  assert.match(screen, /client\.setLatencyListener \{ millis ->/);
+  assert.match(screen, /private fun updateRoomLatency\(millis: Int\)/);
+  assert.match(screen, /tr\("room\.latency", roomLatencyMillis\)/);
+  assert.match(screen, /roomLatencyMillis = -1/);
+  assert.match(screen, /private fun stopRoomPolling\(\)/);
+  assert.match(screen, /roomPollRunnable\?\.let \{ mainHandler\.removeCallbacks\(it\) \}/);
+});
+
+test('v0.7.9 server address accepts bare domains, keeps port/protocol and checks /api/health', () => {
+  const screen = activity();
+  const l10nSrc = l10n();
+  assert.match(screen, /private fun normalizeApiBase\(rawValue: String\): String\?/);
+  // Bare domain -> https://; bare IPv4/IPv6 -> http:// (local VPS friendly).
+  assert.match(screen, /value = if \(ipv4 \|\| ipv6\) "http:\/\/\$value" else "https:\/\/\$value"/);
+  assert.match(screen, /value\.trimEnd\('\/'\)/);
+  assert.match(screen, /java\.net\.URI\(value\)/);
+  assert.match(screen, /if \(parsed\.host\.isNullOrBlank\(\)\) return null/);
+  // Saved, then the same /api/health check runs.
+  assert.match(screen, /private fun saveAndCheckServer\(rawValue: String\)/);
+  assert.match(screen, /val value = normalizeApiBase\(rawValue\)/);
+  assert.match(screen, /apiRequest\("GET", "\/api\/health", null, false\)/);
+  assert.match(screen, /tr\("status\.serverNormalized", apiBase\)/);
+  // Bilingual hints mention a bare domain.
+  assert.match(l10nSrc, /live\.example\.com/);
+});
+
+test('v0.7.9 only the active room polls/stats: no PeerConnection in the lobby', () => {
+  const screen = activity();
+  const lobbyBody = screen.slice(screen.indexOf('private fun renderLobby()'), screen.indexOf('private fun openRoom(stream: LiveStream)'));
+  assert.ok(lobbyBody.length > 0, 'renderLobby section must exist');
+  assert.doesNotMatch(lobbyBody, /WebRtcPlaybackClient|attachLiveRenderer|attachPlayer/);
+  // Polling and stats only exist in the room page and are stopped on leave/destroy.
+  assert.match(screen, /private fun startRoomPolling\(\)/);
+  assert.match(screen, /ROOM_POLL_INTERVAL_MS = 5_000L/);
+  assert.match(screen, /stopRoomPolling\(\)\s*\n\s*stopLivePlayback\(\)\s*\n\s*disconnectChat\(\)/);
+  assert.match(screen, /mainHandler\.removeCallbacksAndMessages\(null\)\s*\n\s*stopRoomPolling\(\)/);
+  // Lobby list refreshes never rebuild the open room page.
+  assert.match(screen, /if \(currentTab == 0 && roomStream == null\) render\(\)/);
+  // 1080p60 keeps 6 Mbps; the service clamps everything else to 2 Mbps or less.
+  assert.match(videoSettings(), /const val LOW_BITRATE_CEILING = 2_000_000/);
+  assert.match(service(), /\.effectiveBitrate\(configuredWidth, configuredHeight, videoFps, requestedBitrate\)/);
 });

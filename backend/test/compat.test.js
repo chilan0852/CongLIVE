@@ -71,10 +71,14 @@ test('Web user client plays live video with WHEP and no HLS/FLV dependency', asy
 test('Android and Web public stream list clients use only live WHEP streams', async () => {
   const api = await read('../src/index.js');
   const activity = await read('../../android/app/src/main/java/com/conglive/app/MainActivity.kt');
-  const web = await read('../../web/src/main.tsx');
+  // v0.7.9 moved the Web REST helpers into web/src/api.ts; the lobby filter still
+  // requires an explicit is_live=true plus a WHEP path before a room is rendered.
+  const web = await read('../../web/src/api.ts');
+  const webMain = await read('../../web/src/main.tsx');
   assert.match(api, /s\.is_live=TRUE/);
   assert.match(activity, /whepPath = item\.optString\("whepPath"/);
-  assert.match(web, /s\.is_live === true && !!s\.whepPath/);
+  assert.match(web, /\.filter\(\(stream: any\) => stream\?\.is_live === true && !!stream\?\.whepPath\)/);
+  assert.match(webMain, /fetchStreams/);
 });
 
 test('Recording URL uses the same public origin as the API request', async () => {

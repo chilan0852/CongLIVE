@@ -14,6 +14,9 @@
 
 - **Android publishing**: native Kotlin app with Camera2 (Camera1 fallback) and screen capture, WHIP publishing, WHEP playback, camera switching, local preview, resolution/FPS controls and MP4 recording playback.
 - **Browser publishing**: React + TypeScript; `getUserMedia` / `getDisplayMedia` → WHIP, quality controls and live preview.
+- **Standalone room page**: click a live cover in the lobby to open `/room/<id>` with player, chat, viewer count and live latency.
+- **Live metrics**: WHEP `getStats` latency monitoring and SRS viewer counts; the lobby shows viewer counts.
+- **Capacity-gated 1080p60**: 1080p/60fps is offered only when `/api/capacity` reports enough server resources; the 2C2G reference server disables it.
 - **Web viewing**: low-latency WHEP playback, live room directory, sign-up/login and real-time chat.
 - **Room features**: custom covers (upload/compress/display), chat, SRS RTC→RTMP DVR recording and an admin dashboard.
 - **Bilingual UI**: switch instantly between Chinese and English in Web, Android and the admin console; the choice is remembered.
@@ -83,7 +86,7 @@ APK output: `android/app/build/outputs/apk/debug/app-debug.apk`. In the app, ope
 ### Android APK download
 
 - [Latest release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.7.8` new-icon APK: `com.conglive.app` / versionCode 20 / minSdk 29 / targetSdk 34
+- `v0.7.9` room/latency APK: `com.conglive.app` / versionCode 21 / minSdk 29 / targetSdk 34
 - No Live2D models are bundled; the APK is for testing.
 
 ## Plugin extensions

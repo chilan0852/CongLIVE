@@ -14,6 +14,9 @@
 
 - **Android 开播**：Kotlin 原生，Camera2（Camera1 回退）/ 屏幕共享，WHIP 推流、WHEP 观看、前后摄切换、本地预览、分辨率/帧率选择、MP4 录像回放。
 - **浏览器开播**：React + TypeScript，`getUserMedia` / `getDisplayMedia` → WHIP，分辨率/帧率选择，实时预览。
+- **独立直播间页面**：大厅点击正在直播的封面进入 `/room/<id>`，含播放器、弹幕、观看人数与实时延迟。
+- **实时指标**：WHEP `getStats` 延迟监控、SRS 观看人数统计；大厅卡片直接显示人数。
+- **1080p60 条件开启**：1080p/60fps 仅在 `/api/capacity` 判断服务器资源足够时开放，2C2G 默认禁用。
 - **Web 观看**：WHEP 低延迟播放、直播大厅、登录注册、实时弹幕。
 - **直播间能力**：自定义封面（上传/压缩/展示）、弹幕、SRS RTC→RTMP DVR 录像、后台管理。
 - **中英双语**：Web、Android 和管理后台均可在中文 / English 之间即时切换并记住选择。
@@ -73,7 +76,7 @@ npm run build      # 或 npm run dev
 ### Android APK 下载
 
 - [最新 Release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.7.8` 新图标 APK：`com.conglive.app` / code 20 / minSdk 29 / targetSdk 34
+- `v0.7.9` 独立房间/1080p60/延迟 APK：`com.conglive.app` / code 21 / minSdk 29 / targetSdk 34
 - 仓库不包含 Live2D 模型；APK 仅用于测试安装。
 
 ### Android

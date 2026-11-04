@@ -70,7 +70,9 @@ private data class LiveStream(
     val username: String,
     val isLive: Boolean,
     val whepPath: String,
-    val coverUrl: String = ""
+    val coverUrl: String = "",
+    /** v0.7.9: live viewer count from GET /api/streams (or WS viewers), -1 when unknown. */
+    val viewers: Int = -1
 )
 
 private data class Recording(
@@ -94,6 +96,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS = "conglive"
         private const val DEFAULT_API = "http://10.0.2.2:3000"
         private const val COVER_PREF_PREFIX = "cover_"
+        /** v0.7.9: the standalone room polls GET /api/streams/:id; the lobby never does. */
+        private const val ROOM_POLL_INTERVAL_MS = 5_000L
 
         // v0.7.6 dark gradient theme.
         private val BG_TOP = 0xFF060A14.toInt()
@@ -161,6 +165,30 @@ class MainActivity : AppCompatActivity() {
     private var cameraPreviewRenderer: SurfaceViewRenderer? = null
     private var videoResolution = VideoSettings.defaultResolution()
     private var videoFps = VideoSettings.DEFAULT_FPS
+
+    // ------------------------------------------------------------------
+    // v0.7.9: standalone live-room page, latency badge and capacity gating.
+    /** Non-null while the standalone room page replaces the lobby content. */
+    private var roomStream: LiveStream? = null
+    private var roomViewers: Int = -1
+    private var roomLatencyMillis: Int = -1
+    private var roomPollRunnable: Runnable? = null
+    private var roomPollFailures = 0
+    private var roomStatusText = ""
+    private var roomLatencyView: TextView? = null
+    private var roomViewersView: TextView? = null
+    private var roomChatBox: LinearLayout? = null
+    private var roomStatusView: TextView? = null
+    /** Shell chrome views, hidden while the full-screen room page is open. */
+    private var headerView: View? = null
+    private var statusRowView: View? = null
+    private var navView: View? = null
+    /** null while unknown; true/false from GET /api/capacity `allow1080p60`. */
+    private var capacityAllow1080p60: Boolean? = null
+    private var capacityReason: String = ""
+    private var capacityChecked = false
+    private var capacityFetching = false
+    private val capacityCallbacks = mutableListOf<() -> Unit>()
 
     private var navButtons: MutableList<LinearLayout> = mutableListOf()
     private var pendingCoverStreamId: Long = 0L
@@ -359,7 +387,7 @@ class MainActivity : AppCompatActivity() {
         })
         header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
-            text = "v0.7.7"
+            text = "v0.7.9"
             textSize = 10.5f
             setTextColor(0xFFD9CEFF.toInt())
             gravity = Gravity.CENTER
@@ -367,6 +395,7 @@ class MainActivity : AppCompatActivity() {
             background = rounded(0x338B72FF, 12)
         })
         root.addView(header)
+        headerView = header
 
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -386,6 +415,7 @@ class MainActivity : AppCompatActivity() {
         }
         statusRow.addView(statusView, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(statusRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        statusRowView = statusRow
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -440,6 +470,7 @@ class MainActivity : AppCompatActivity() {
             navButtons.add(item)
         }
         root.addView(nav, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        navView = nav
         setContentView(root)
     }
 
@@ -450,6 +481,9 @@ class MainActivity : AppCompatActivity() {
             stopLivePlayback()
         }
         if (index == 0) refreshStreams()
+        // v0.7.9: capacity is fetched when the broadcast page opens (and again right
+        // before going live) so 1080p / 60fps is only offered when the server allows it.
+        if (index == 1) refreshCapacity()
         if (index == 2) loadRecordings()
         if (index == 3) loadMyStreams()
         render()
@@ -472,8 +506,15 @@ class MainActivity : AppCompatActivity() {
         }
         cameraPreviewRenderer = null
         paintNav()
+        applyChromeVisibility()
         if (currentTab == 4) live2DViewer?.setPaused(false) else live2DViewer?.setPaused(true)
         content.removeAllViews()
+        // v0.7.9: the standalone room is a full-screen page that replaces the lobby.
+        val room = roomStream
+        if (room != null) {
+            renderRoom(room)
+            return
+        }
         if (token.isNullOrBlank()) renderAuthCard()
         when (currentTab) {
             0 -> renderLobby()
@@ -482,6 +523,14 @@ class MainActivity : AppCompatActivity() {
             3 -> renderProfile()
             else -> renderLive2D()
         }
+    }
+
+    /** v0.7.9: hides the app shell (header/status/nav) while the room page is open. */
+    private fun applyChromeVisibility() {
+        val inRoom = roomStream != null
+        headerView?.visibility = if (inRoom) View.GONE else View.VISIBLE
+        statusRowView?.visibility = if (inRoom) View.GONE else View.VISIBLE
+        navView?.visibility = if (inRoom) View.GONE else View.VISIBLE
     }
 
     private fun renderAuthCard() {
@@ -531,6 +580,9 @@ class MainActivity : AppCompatActivity() {
                     setPadding(dp(10), dp(10), dp(10), dp(12))
                     background = rounded(PANEL_ALT, 18, stroke = true)
                     elevation = dp(3).toFloat()
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { openRoom(stream) }
                 }
                 item.addView(coverFrame(stream.title, stream.coverUrl, large = true), LinearLayout.LayoutParams(-1, dp(148)))
                 val line = horizontal()
@@ -553,74 +605,318 @@ class MainActivity : AppCompatActivity() {
                     background = rounded(if (stream.isLive) 0x2254E0A8 else 0x11FFFFFF, 10)
                 })
                 item.addView(line)
-                item.addView(actionButton(if (selectedStream?.id == stream.id) tr("lobby.currentRoom") else tr("lobby.watch"), true) {
-                    if (!stream.isLive) {
-                        setStatus(tr("status.notLive"))
-                    } else {
-                        selectedStream = stream
-                        selectedRecording = null
-                        stopPlayback()
-                        connectChat(stream.id)
-                        render()
-                    }
-                }.apply { isEnabled = stream.isLive })
+                // v0.7.9: tapping the whole card (or this button) opens the standalone room page.
+                item.addView(actionButton(tr("lobby.enter"), true) { openRoom(stream) }.apply {
+                    isEnabled = stream.isLive
+                })
                 top.addView(item, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
             }
         }
         content.addView(top, cardParams())
+    }
 
-        selectedStream?.let { stream ->
-            val playback = panel()
-            playback.addView(heading(tr("lobby.watching", stream.title)))
-            playback.addView(body(tr("lobby.host", stream.username)))
-            attachLiveRenderer(playback, 210, stream)
-            val chatCard = panel()
-            chatCard.addView(heading(tr("chat.title")))
-            chatCard.addView(body(if (token.isNullOrBlank()) tr("status.needLoginComments") else tr("chat.connection", chatSocketText())))
-            val messagesBox = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(10), dp(8), dp(10), dp(8))
-                background = rounded(PANEL_ALT, 14, stroke = true)
+    // ---------------------------------------------------------------------
+    // Standalone live room (v0.7.9)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Opens the full-screen room page. Playback/peer connections, stats sampling
+     * and room polling only exist while this page is open: the lobby never builds a
+     * PeerConnection.
+     */
+    private fun openRoom(stream: LiveStream) {
+        if (roomStream?.id == stream.id) return
+        selectedStream = stream
+        selectedRecording = null
+        stopPlayback()
+        stopRoomPolling()
+        disconnectChat()
+        roomStream = stream
+        roomViewers = stream.viewers
+        roomLatencyMillis = -1
+        roomPollFailures = 0
+        roomStatusText = tr("room.connecting")
+        applyChromeVisibility()
+        connectChat(stream.id)
+        render()
+        fetchRoomDetail()
+        startRoomPolling()
+    }
+
+    /** Leaves the room page and returns to the lobby. */
+    private fun leaveRoom(message: String? = null) {
+        if (roomStream == null) return
+        stopRoomPolling()
+        stopLivePlayback()
+        disconnectChat()
+        roomStream = null
+        selectedStream = null
+        roomViewers = -1
+        roomLatencyMillis = -1
+        roomPollFailures = 0
+        roomStatusText = ""
+        roomLatencyView = null
+        roomViewersView = null
+        roomChatBox = null
+        roomStatusView = null
+        if (!message.isNullOrBlank()) setStatus(message)
+        applyChromeVisibility()
+        render()
+    }
+
+    /** Only the room page polls the stream detail; a 404 / ended stream returns to the lobby. */
+    private fun startRoomPolling() {
+        stopRoomPolling()
+        val runnable = object : Runnable {
+            override fun run() {
+                if (roomStream == null) return
+                fetchRoomDetail()
+                mainHandler.postDelayed(this, ROOM_POLL_INTERVAL_MS)
             }
-            if (chatMessages.isEmpty()) messagesBox.addView(body(tr("chat.empty")))
-            chatMessages.takeLast(60).forEach { message ->
-                val line = horizontal()
-                line.addView(TextView(this).apply {
-                    text = message.username
-                    textSize = 12f
-                    setTextColor(PURPLE)
-                    setTypeface(typeface, Typeface.BOLD)
-                })
-                line.addView(TextView(this).apply {
-                    text = "  ${message.content}"
-                    textSize = 13f
-                    setTextColor(TEXT)
-                }, LinearLayout.LayoutParams(0, -2, 1f))
-                messagesBox.addView(line)
+        }
+        roomPollRunnable = runnable
+        mainHandler.postDelayed(runnable, ROOM_POLL_INTERVAL_MS)
+    }
+
+    private fun stopRoomPolling() {
+        roomPollRunnable?.let { mainHandler.removeCallbacks(it) }
+        roomPollRunnable = null
+    }
+
+    /** GET /api/streams/:id refreshes title/cover/whepPath/viewers and detects the end. */
+    private fun fetchRoomDetail() {
+        val stream = roomStream ?: return
+        apiRequest("GET", "/api/streams/${stream.id}", null, false) { result ->
+            val current = roomStream
+            if (current == null || current.id != stream.id) return@apiRequest
+            if (result.code == 404) {
+                leaveRoom(tr("room.notFound"))
+                return@apiRequest
             }
-            chatCard.addView(messagesBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-            val chatInput = input(tr("chat.placeholder")).apply { filters = arrayOf(InputFilter.LengthFilter(500)) }
-            val send = actionButton(tr("chat.send"), true) { sendChat(chatInput.text.toString()); chatInput.setText("") }
-            val chatRow = horizontal()
-            chatRow.addView(chatInput, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(8) })
-            chatRow.addView(send)
-            chatCard.addView(chatRow)
-            chatCard.addView(actionButton(tr("chat.leave"), false) {
-                disconnectChat()
-                selectedStream = null
-                stopPlayback()
-                render()
-            })
-            content.addView(playback, cardParams())
-            content.addView(chatCard, cardParams())
+            if (result.code !in 200..299) {
+                roomPollFailures += 1
+                if (roomPollFailures >= 3) setStatus(tr("room.loadFailed", tr("status.httpError", tr("room.title"), result.code)))
+                return@apiRequest
+            }
+            roomPollFailures = 0
+            val payload = result.obj ?: return@apiRequest
+            // Accept both {stream:{...}, viewers:N} and a flat object.
+            val detail = payload.optJSONObject("stream") ?: payload
+            val live = if (detail.has("is_live")) detail.optBooleanCompat("is_live") else current.isLive
+            val viewers = when {
+                detail.has("viewers") -> detail.optInt("viewers", current.viewers)
+                payload.has("viewers") -> payload.optInt("viewers", current.viewers)
+                else -> current.viewers
+            }
+            roomViewers = viewers
+            if (!live) {
+                leaveRoom(tr("room.ended"))
+                return@apiRequest
+            }
+            val coverFromServer = resolveApiUrl(
+                detail.optString("coverUrl").ifBlank { detail.optString("cover_url") }
+            )
+            val updated = current.copy(
+                title = detail.optString("title", current.title).ifBlank { current.title },
+                username = detail.optString("username", current.username).ifBlank { current.username },
+                whepPath = detail.optString("whepPath", "").ifBlank { current.whepPath },
+                coverUrl = coverFromServer.ifBlank { current.coverUrl },
+                viewers = viewers
+            )
+            val metaChanged = updated.title != current.title ||
+                updated.username != current.username ||
+                updated.whepPath != current.whepPath ||
+                updated.coverUrl != current.coverUrl
+            roomStream = updated
+            if (metaChanged) render() else updateRoomMeta()
         }
     }
+
+    /** The full-screen room: back / cover / title / host / WHEP player / viewers / latency / chat. */
+    private fun renderRoom(stream: LiveStream) {
+        roomLatencyView = null
+        roomViewersView = null
+        roomChatBox = null
+        roomStatusView = null
+        val top = panel()
+        val bar = horizontal()
+        bar.addView(actionButton(tr("room.back"), false) { leaveRoom() })
+        bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        bar.addView(TextView(this).apply {
+            text = if (stream.isLive) tr("lobby.live") else tr("lobby.offline")
+            textSize = 11f
+            setTextColor(if (stream.isLive) GREEN else MUTED)
+            setPadding(dp(9), dp(3), dp(9), dp(3))
+            background = rounded(if (stream.isLive) 0x2254E0A8 else 0x11FFFFFF, 10)
+        })
+        top.addView(bar)
+        top.addView(heading(stream.title))
+        top.addView(body(tr("room.host", stream.username)))
+        top.addView(
+            coverFrame(stream.title, stream.coverUrl, large = true),
+            LinearLayout.LayoutParams(-1, dp(148)).apply { topMargin = dp(8) }
+        )
+        val metaRow = horizontal()
+        roomViewersView = body(roomViewersText())
+        metaRow.addView(roomViewersView, LinearLayout.LayoutParams(0, -2, 1f))
+        roomLatencyView = TextView(this).apply {
+            text = roomLatencyText()
+            textSize = 12f
+            setTextColor(TEAL)
+            gravity = Gravity.END
+        }
+        metaRow.addView(roomLatencyView)
+        top.addView(metaRow)
+        // The WHEP player and the 1 Hz latency stats live only inside the room page.
+        attachLiveRenderer(top, 210, stream)
+        val notice = body(roomStatusText)
+        roomStatusView = notice
+        top.addView(notice)
+        content.addView(top, cardParams())
+
+        val chatCard = panel()
+        chatCard.addView(heading(tr("chat.title")))
+        chatCard.addView(
+            body(
+                if (token.isNullOrBlank()) tr("status.needLoginComments")
+                else tr("chat.connection", chatSocketText())
+            )
+        )
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = rounded(PANEL_ALT, 14, stroke = true)
+        }
+        roomChatBox = box
+        chatCard.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        fillRoomChat()
+        val chatInput = input(tr("chat.placeholder")).apply { filters = arrayOf(InputFilter.LengthFilter(500)) }
+        val send = actionButton(tr("chat.send"), true) {
+            sendChat(chatInput.text.toString())
+            chatInput.setText("")
+        }
+        val chatRow = horizontal()
+        chatRow.addView(chatInput, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(8) })
+        chatRow.addView(send)
+        chatCard.addView(chatRow)
+        chatCard.addView(actionButton(tr("room.leave"), false) { leaveRoom() })
+        content.addView(chatCard, cardParams())
+    }
+
+    /** Rebuilds just the danmaku list (keeps the player and the input untouched). */
+    private fun fillRoomChat() {
+        val box = roomChatBox ?: return
+        box.removeAllViews()
+        if (chatMessages.isEmpty()) {
+            box.addView(body(tr("chat.empty")))
+            return
+        }
+        chatMessages.takeLast(60).forEach { message ->
+            val line = horizontal()
+            line.addView(TextView(this).apply {
+                text = message.username
+                textSize = 12f
+                setTextColor(PURPLE)
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            line.addView(TextView(this).apply {
+                text = "  ${message.content}"
+                textSize = 13f
+                setTextColor(TEXT)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            box.addView(line)
+        }
+    }
+
+    private fun updateRoomMeta() {
+        roomViewersView?.text = roomViewersText()
+        roomLatencyView?.text = roomLatencyText()
+    }
+
+    private fun updateRoomLatency(millis: Int) {
+        roomLatencyMillis = millis
+        roomLatencyView?.text = roomLatencyText()
+    }
+
+    private fun roomViewersText(): String =
+        if (roomViewers >= 0) tr("room.viewers", roomViewers) else tr("room.viewersPending")
+
+    private fun roomLatencyText(): String =
+        if (roomLatencyMillis >= 0) tr("room.latency", roomLatencyMillis) else tr("room.latencyPending")
 
     private var chatSocketState = ""
 
     /** Chat connection state; falls back to the localized "disconnected" label. */
     private fun chatSocketText(): String =
         chatSocketState.ifBlank { tr("chat.disconnected") }
+
+    // ---------------------------------------------------------------------
+    // v0.7.9: server capacity gate (GET /api/capacity)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Fetches GET /api/capacity. When [force] is false a successful earlier result is
+     * reused. [done] runs on the UI thread after the request (success or failure).
+     */
+    private fun refreshCapacity(force: Boolean = false, done: (() -> Unit)? = null) {
+        if (done != null) capacityCallbacks.add(done)
+        if (capacityFetching) return
+        if (capacityChecked && !force) {
+            runCapacityCallbacks()
+            return
+        }
+        capacityFetching = true
+        apiRequest("GET", "/api/capacity", null, false) { result ->
+            capacityFetching = false
+            capacityChecked = true
+            if (result.code in 200..299 && result.obj != null) {
+                val capacity = result.obj
+                val allowed = capacity.optBooleanCompat("allow1080p60")
+                capacityAllow1080p60 = allowed
+                capacityReason = capacity.optString("reason").trim()
+                // A persisted 1080p / 60fps choice must not survive a server downgrade.
+                if (!allowed) resetHighQualitySelection()
+            } else {
+                // Unknown capacity is treated as "not allowed" until a later check succeeds.
+                capacityAllow1080p60 = null
+                capacityReason = ""
+            }
+            if (currentTab == 1 && roomStream == null) render()
+            runCapacityCallbacks()
+        }
+    }
+
+    private fun runCapacityCallbacks() {
+        val callbacks = capacityCallbacks.toList()
+        capacityCallbacks.clear()
+        callbacks.forEach { it() }
+    }
+
+    /** Drops a persisted 1080p / 60fps selection when the server cannot handle it. */
+    private fun resetHighQualitySelection() {
+        if (!VideoSettings.requiresHighCapacity(videoResolution, videoFps)) return
+        videoResolution = VideoSettings.defaultResolution()
+        videoFps = VideoSettings.DEFAULT_FPS
+        persistVideoSettings()
+        setStatus(tr("broadcast.highQualityReset"))
+    }
+
+    /** Localized reason for the disabled 1080p / 60fps buttons. */
+    private fun capacityLimitReason(): String {
+        val raw = capacityReason.trim()
+        if (raw.isEmpty()) return tr("broadcast.capacityLimited")
+        val mapped = L10n.serverError(lang, raw)
+        // The backend reason stays Chinese; English UI gets the generic capacity hint.
+        val hasChinese = mapped.any { it.code in 0x4E00..0x9FFF }
+        return if (lang == Lang.EN && hasChinese) tr("broadcast.capacityLimited") else mapped
+    }
+
+    private fun capacitySummaryText(): String = when {
+        capacityAllow1080p60 == true -> tr("broadcast.capacityAllowed")
+        capacityAllow1080p60 == false -> tr("broadcast.capacityDisabled", capacityLimitReason())
+        capacityFetching -> tr("broadcast.capacityChecking")
+        else -> tr("broadcast.capacityUnavailable")
+    }
 
     // ---------------------------------------------------------------------
     // Broadcast
@@ -664,6 +960,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
         card.addView(sectionLabel(tr("broadcast.qualityTitle")))
+        // v0.7.9: 1080p / 60fps stay disabled until GET /api/capacity reports
+        // allow1080p60=true; the reason row explains why (2C/2G server disables them).
+        val allowHighQuality = capacityAllow1080p60 == true
         val resolutionRow = horizontal()
         VideoSettings.RESOLUTIONS.forEach { option ->
             val button = actionButton(option.label, false) {
@@ -677,11 +976,12 @@ class MainActivity : AppCompatActivity() {
                             option.label,
                             option.width,
                             option.height,
-                            bitrateLabel(option.bitrateBps)
+                            bitrateLabel(VideoSettings.effectiveBitrate(option, videoFps))
                         )
                     )
                 }
             }
+            if (option.id == VideoSettings.HIGH_RESOLUTION_ID) button.isEnabled = allowHighQuality
             resolutionButtons[option.id] = button
             resolutionRow.addView(button, weighted())
         }
@@ -696,12 +996,16 @@ class MainActivity : AppCompatActivity() {
                     setStatus(tr("broadcast.fpsSaved", fps))
                 }
             }
+            if (fps >= VideoSettings.HIGH_FPS) button.isEnabled = allowHighQuality
             fpsButtons[fps] = button
             fpsRow.addView(button, weighted())
         }
         card.addView(fpsRow)
         paintQualitySelection()
         card.addView(qualitySummary)
+        card.addView(sectionLabel(tr("broadcast.capacityTitle")))
+        card.addView(body(capacitySummaryText()))
+        card.addView(actionButton(tr("lobby.refresh"), false) { refreshCapacity(force = true) })
 
         if (videoSourceMode == "camera") {
             card.addView(body(tr("broadcast.cameraBody")))
@@ -740,7 +1044,7 @@ class MainActivity : AppCompatActivity() {
                     if (videoSourceMode == "camera") tr("broadcast.sourceCamera") else tr("broadcast.sourceScreen")
                 )
             )
-            card.addView(infoRow(tr("broadcast.qualityLabel"), "${videoResolution.label} · ${bitrateLabel(videoResolution.bitrateBps)} · $videoFps fps"))
+            card.addView(infoRow(tr("broadcast.qualityLabel"), "${videoResolution.label} · ${bitrateLabel(VideoSettings.effectiveBitrate(videoResolution, videoFps))} · $videoFps fps"))
             card.addView(infoRow(tr("broadcast.publishPath"), createdPublishPath))
             if (createdStreamId > 0L) {
                 card.addView(sectionLabel(tr("broadcast.coverTitle")))
@@ -1035,9 +1339,48 @@ class MainActivity : AppCompatActivity() {
     // Networking / auth
     // ---------------------------------------------------------------------
 
+    /**
+     * v0.7.9 server address normalization:
+     *  - `live.example.com`        -> `https://live.example.com`
+     *  - `live.example.com:8443`   -> `https://live.example.com:8443`
+     *  - `192.168.1.5:3000`        -> `http://192.168.1.5:3000` (IP literals default to http)
+     *  - explicit http(s)://, ports and paths are preserved; a trailing "/" is removed.
+     * Returns null when the result is not a valid http(s) URL.
+     */
+    private fun normalizeApiBase(rawValue: String): String? {
+        var value = rawValue.trim()
+        if (value.isEmpty() || value.contains(' ')) return null
+        value = value.trimEnd('/')
+        if (value.isEmpty()) return null
+        val hasScheme = value.startsWith("http://", ignoreCase = true) ||
+            value.startsWith("https://", ignoreCase = true)
+        if (!hasScheme) {
+            // Bare input: domains get https, IP literals keep the usual plain-http port.
+            val hostPart = value.substringBefore('/')
+            val hostNoPort = hostPart.substringBeforeLast(':', hostPart)
+            val ipv4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(hostNoPort)
+            val ipv6 = hostPart.startsWith("[")
+            value = if (ipv4 || ipv6) "http://$value" else "https://$value"
+        }
+        // Normalize the scheme to lower case while preserving host/port/path.
+        value = when {
+            value.startsWith("http://", ignoreCase = true) -> "http://" + value.substring(7)
+            value.startsWith("https://", ignoreCase = true) -> "https://" + value.substring(8)
+            else -> return null
+        }
+        val parsed = try {
+            java.net.URI(value)
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        if (parsed.scheme?.lowercase(Locale.US) !in listOf("http", "https")) return null
+        if (parsed.host.isNullOrBlank()) return null
+        return value
+    }
+
     private fun saveAndCheckServer(rawValue: String) {
-        val value = rawValue.trim().trimEnd('/')
-        if (!value.startsWith("http://") && !value.startsWith("https://")) {
+        val value = normalizeApiBase(rawValue)
+        if (value.isNullOrBlank()) {
             setStatus(tr("status.serverInvalid"))
             return
         }
@@ -1045,9 +1388,15 @@ class MainActivity : AppCompatActivity() {
             setStatus(tr("status.serverNoApiSuffix"))
             return
         }
+        val previous = apiBase
         apiBase = value
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("api", apiBase).apply()
-        setStatus(tr("status.serverChecking", apiBase))
+        // Show the completed address (e.g. a bare domain became https://…) when it changed.
+        if (value != rawValue.trim() && value.trimEnd('/') != previous.trimEnd('/')) {
+            setStatus(tr("status.serverNormalized", apiBase))
+        } else {
+            setStatus(tr("status.serverChecking", apiBase))
+        }
         apiRequest("GET", "/api/health", null, false) { result ->
             if (result.code == 200 && result.obj?.optBoolean("ok") == true) {
                 val dbStatus = result.obj.optString("database", "unknown")
@@ -1125,6 +1474,23 @@ class MainActivity : AppCompatActivity() {
             return
         }
         liveStatusMessage = if (videoSourceMode == "camera") tr("status.waitCameraPermission") else tr("status.waitScreenPermission")
+        setStatus(liveStatusMessage)
+        // v0.7.9: check GET /api/capacity right before going live. 1080p / 60fps
+        // must never start when the server reports allow1080p60 != true.
+        refreshCapacity(force = true) { startCaptureAfterCapacity() }
+    }
+
+    private fun startCaptureAfterCapacity() {
+        if (VideoSettings.requiresHighCapacity(videoResolution, videoFps) && capacityAllow1080p60 != true) {
+            videoResolution = VideoSettings.defaultResolution()
+            videoFps = VideoSettings.DEFAULT_FPS
+            persistVideoSettings()
+            val message = tr("broadcast.highQualityBlocked", capacityLimitReason())
+            liveStatusMessage = message
+            setStatus(message)
+            render()
+            return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
         } else beginSelectedCapture()
@@ -1195,7 +1561,9 @@ class MainActivity : AppCompatActivity() {
     private fun putVideoExtras(intent: Intent) {
         intent.putExtra(ScreenStreamService.EXTRA_VIDEO_WIDTH, videoResolution.width)
         intent.putExtra(ScreenStreamService.EXTRA_VIDEO_HEIGHT, videoResolution.height)
-        intent.putExtra(ScreenStreamService.EXTRA_VIDEO_BITRATE, videoResolution.bitrateBps)
+        // v0.7.9 bitrate clamp: only 1080p + 60fps keeps the 6 Mbps profile; the
+        // service clamps again defensively before it touches the RTP sender.
+        intent.putExtra(ScreenStreamService.EXTRA_VIDEO_BITRATE, VideoSettings.effectiveBitrate(videoResolution, videoFps))
         intent.putExtra(ScreenStreamService.EXTRA_VIDEO_FPS, videoFps)
     }
 
@@ -1206,7 +1574,7 @@ class MainActivity : AppCompatActivity() {
             resolution.label,
             resolution.width,
             resolution.height,
-            bitrateLabel(resolution.bitrateBps),
+            bitrateLabel(VideoSettings.effectiveBitrate(resolution, videoFps)),
             videoFps,
             resolution.height,
             resolution.width,
@@ -1237,13 +1605,15 @@ class MainActivity : AppCompatActivity() {
                         username = item.optString("username", tr("chat.user")),
                         isLive = true,
                         whepPath = whepPath,
-                        coverUrl = resolveApiUrl(item.optString("coverUrl").ifBlank { item.optString("cover_url") })
+                        coverUrl = resolveApiUrl(item.optString("coverUrl").ifBlank { item.optString("cover_url") }),
+                        // v0.7.9: the backend adds the SRS viewer count to each live stream.
+                        viewers = item.optInt("viewers", -1)
                     ))
                 }
                 // The public lobby is live-only. Keep the server as the source of truth,
                 // and filter locally as a compatibility guard for older backend builds.
                 streams = next.filter { it.isLive }
-                if (currentTab == 0) render()
+                if (currentTab == 0 && roomStream == null) render()
             } else if (result.code != 0) {
                 handleApiError(result, tr("status.streamsReadFailed"), false)
             }
@@ -1383,13 +1753,28 @@ class MainActivity : AppCompatActivity() {
                             runOnUiThread {
                                 chatMessages.add(message)
                                 if (chatMessages.size > 100) chatMessages.removeAt(0)
-                                if (currentTab == 0 && selectedStream?.id == streamId) render()
+                                if (roomStream?.id == streamId) fillRoomChat()
+                                else if (currentTab == 0 && selectedStream?.id == streamId) render()
+                            }
+                        }
+                        // v0.7.9: the backend broadcasts {type:'viewers',streamId,viewers}
+                        // on ready and whenever the SRS viewer count changes.
+                        "viewers" -> {
+                            val viewersStreamId = data.optLong("streamId", -1L)
+                            val viewers = data.optInt("viewers", -1)
+                            runOnUiThread {
+                                val current = roomStream
+                                if (current != null && viewersStreamId == current.id && viewers >= 0) {
+                                    roomViewers = viewers
+                                    if (current.viewers != viewers) roomStream = current.copy(viewers = viewers)
+                                    roomViewersView?.text = roomViewersText()
+                                }
                             }
                         }
                         "warning", "error" -> runOnUiThread {
                             chatSocketState = L10n.serverError(lang, data.optString("message", tr("chat.unavailable")))
                             setStatus(chatSocketState)
-                            if (currentTab == 0) render()
+                            if (roomStream == null && currentTab == 0) render()
                         }
                     }
                 } catch (_: Exception) { }
@@ -1409,7 +1794,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
-        render()
     }
 
     private fun disconnectChat() {
@@ -1458,6 +1842,12 @@ class MainActivity : AppCompatActivity() {
                 lang
             ) { message -> runOnUiThread { setStatus(message) } }
             livePlaybackClient = client
+            // v0.7.9: 1 Hz WHEP getStats latency (jitter buffer + RTT) for the room page.
+            client.setLatencyListener { millis ->
+                runOnUiThread {
+                    if (roomStream?.id == stream.id) updateRoomLatency(millis)
+                }
+            }
             // init 必须在 addView 之前，确保 Surface 创建后 EGL 渲染链已就绪。
             client.attachRenderer(view)
             parent.addView(view)
@@ -1472,10 +1862,13 @@ class MainActivity : AppCompatActivity() {
     private fun stopLivePlayback() {
         // Remove the renderer from the window before WebRtcPlaybackClient releases it.
         liveRenderer?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
+        // close() also stops the 1 Hz latency sampler (v0.7.9).
         livePlaybackClient?.close()
         livePlaybackClient = null
         livePlaybackStreamId = 0L
         liveRenderer = null
+        roomLatencyMillis = -1
+        roomLatencyView?.text = roomLatencyText()
     }
 
     /** Media3 is retained only for MP4 recordings. Live streams use WHEP/WebRTC. */
@@ -1606,6 +1999,11 @@ class MainActivity : AppCompatActivity() {
     private fun setStatus(message: String) {
         statusMessage = message
         if (::statusView.isInitialized) statusView.text = message
+        // v0.7.9: the room page has no shell status bar, so mirror it into the player notice.
+        if (roomStream != null) {
+            roomStatusText = message
+            roomStatusView?.text = message
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1825,8 +2223,19 @@ class MainActivity : AppCompatActivity() {
         else registerReceiver(statusReceiver, filter)
     }
 
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        // v0.7.9: hardware/gesture back leaves the full-screen room before the activity.
+        if (roomStream != null) {
+            leaveRoom()
+            return
+        }
+        super.onBackPressed()
+    }
+
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        stopRoomPolling()
         try { unregisterReceiver(statusReceiver) } catch (_: Exception) { }
         disconnectChat()
         playerView?.player = null
@@ -1838,6 +2247,11 @@ class MainActivity : AppCompatActivity() {
             CameraPreviewBridge.detach(preview)
         }
         cameraPreviewRenderer = null
+        roomStream = null
+        roomLatencyView = null
+        roomViewersView = null
+        roomChatBox = null
+        roomStatusView = null
         CameraPreviewBridge.onStatus = null
         live2DViewer?.destroy()
         live2DViewer = null

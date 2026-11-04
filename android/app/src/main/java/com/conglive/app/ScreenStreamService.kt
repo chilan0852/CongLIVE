@@ -169,10 +169,15 @@ class ScreenStreamService : Service() {
         val fallback = VideoSettings.defaultResolution()
         configuredWidth = sanitizeDimension(intent.getIntExtra(EXTRA_VIDEO_WIDTH, fallback.width), fallback.width)
         configuredHeight = sanitizeDimension(intent.getIntExtra(EXTRA_VIDEO_HEIGHT, fallback.height), fallback.height)
-        videoBitrateBps = intent.getIntExtra(EXTRA_VIDEO_BITRATE, fallback.bitrateBps)
-            .coerceIn(MIN_VIDEO_BITRATE, MAX_VIDEO_BITRATE)
         val requestedFps = intent.getIntExtra(EXTRA_VIDEO_FPS, VideoSettings.DEFAULT_FPS)
+        // v0.7.9: 60 fps is now a supported option (60/30/24/15).
         videoFps = if (requestedFps in VideoSettings.FPS_OPTIONS) requestedFps else VideoSettings.DEFAULT_FPS
+        // v0.7.9 bitrate clamp: only the 1080p + 60 fps profile may use the high
+        // bitrate; every other combination is kept at the low-bitrate ceiling.
+        val requestedBitrate = intent.getIntExtra(EXTRA_VIDEO_BITRATE, fallback.bitrateBps)
+        videoBitrateBps = VideoSettings
+            .effectiveBitrate(configuredWidth, configuredHeight, videoFps, requestedBitrate)
+            .coerceIn(MIN_VIDEO_BITRATE, MAX_VIDEO_BITRATE)
         iFrameInterval = VideoSettings.DEFAULT_IFRAME_INTERVAL
         isStarting = true
         isStopping = false
@@ -346,12 +351,17 @@ class ScreenStreamService : Service() {
         iFrameInterval: Int = VideoSettings.DEFAULT_IFRAME_INTERVAL
     ) {
         val source = videoSource ?: throw IllegalStateException(tr("svc.videoSourceMissing"))
-        videoBitrateBps = bitrateBps
+        // v0.7.9: clamp here as well so a direct prepareVideo() call can never push a
+        // non-1080p60 profile above the low-bitrate ceiling.
+        val clampedBitrate = VideoSettings
+            .effectiveBitrate(width, height, fps, bitrateBps)
+            .coerceIn(MIN_VIDEO_BITRATE, MAX_VIDEO_BITRATE)
+        videoBitrateBps = clampedBitrate
         videoFps = fps
         this.iFrameInterval = iFrameInterval
         // 采集尺寸由 startCapture() 指定；这里让编码端按设置的分辨率/帧率输出。
         source.adaptOutputFormat(width, height, fps)
-        sendStatus(tr("svc.videoParams", width, height, fps, bitrateBps / 1000, iFrameInterval), STATUS_INFO)
+        sendStatus(tr("svc.videoParams", width, height, fps, clampedBitrate / 1000, iFrameInterval), STATUS_INFO)
     }
 
     /** Applies the configured bitrate / frame rate to the video RTP sender.

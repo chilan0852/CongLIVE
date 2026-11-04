@@ -195,13 +195,18 @@ object L10n {
             ),
         "status.coverUploadFailed" to ("封面上传失败" to "Cover upload failed"),
         "status.serverInvalid" to (
-            "服务器地址必须以 http:// 或 https:// 开头" to
-                "The server address must start with http:// or https://"
+            "服务器地址无效，请填写域名或 IP（可带端口），例如 live.example.com 或 http://192.168.1.5:3000" to
+                "Invalid server address; enter a domain or IP (optionally with a port), e.g. live.example.com or http://192.168.1.5:3000"
+            ),
+        "status.serverNormalized" to (
+            "已自动补全服务器地址：%s" to
+                "Server address completed automatically: %s"
             ),
         "status.serverNoApiSuffix" to (
-            "地址不要带 /api 后缀，例如填写 http://服务器IP:3000" to
-                "Do not append /api to the address, e.g. http://SERVER_IP:3000"
+            "地址不要带 /api 后缀，例如填写 live.example.com 或 http://服务器IP:3000" to
+                "Do not append /api to the address, e.g. live.example.com or http://SERVER_IP:3000"
             ),
+        "status.roomReadFailed" to ("读取直播间信息失败（HTTP %s）" to "Failed to read the live room (HTTP %s)"),
         "status.serverChecking" to ("正在检查服务器：%s" to "Checking the server: %s"),
         "status.serverOk" to (
             "服务器连接成功，API 正常，数据库：%s。现在可以注册或登录。" to
@@ -276,12 +281,12 @@ object L10n {
         "auth.login" to ("登录" to "Sign in"),
         "auth.register" to ("注册" to "Register"),
         "auth.serverHint" to (
-            "首次使用或更换 VPS 时，请先设置服务器 API 地址。真机不能使用模拟器默认地址 10.0.2.2。" to
-                "On first use or when switching VPS, set the server API address first. A real device cannot use the emulator default 10.0.2.2."
+            "首次使用或更换 VPS 时，请先设置服务器地址。可只填域名（自动补 https://），例如 live.example.com；真机不能用模拟器默认地址 10.0.2.2。" to
+                "Set the server address on first use or when switching VPS. A bare domain (e.g. live.example.com) is completed with https:// automatically. A real device cannot use the emulator default 10.0.2.2."
             ),
         "auth.serverPlaceholder" to (
-            "服务器 API 根地址（例如 http://VPS公网IP:3000）" to
-                "Server API root URL (e.g. http://YOUR_VPS_IP:3000)"
+            "服务器地址（域名或 http://IP:端口）" to
+                "Server address (domain, or http://IP:PORT)"
             ),
         "auth.saveServer" to ("保存地址并检查服务器" to "Save address and check server"),
         // ---------------------------------------------------------------- lobby
@@ -317,6 +322,24 @@ object L10n {
         "chat.networkError" to ("网络错误" to "network error"),
         "chat.room" to ("直播间" to "the room"),
         "chat.user" to ("用户" to "User"),
+        // -------------------------------------------------- room (v0.7.9)
+        "lobby.enter" to ("进入直播间" to "Enter room"),
+        "room.title" to ("直播间" to "Live room"),
+        "room.back" to ("← 返回大厅" to "← Back to lobby"),
+        "room.leave" to ("离开直播间" to "Leave room"),
+        "room.connecting" to ("正在进入直播间…" to "Entering the live room…"),
+        "room.needLogin" to ("登录后才能观看直播间" to "Sign in to watch the live room"),
+        "room.viewers" to ("观看人数：%s" to "Viewers: %s"),
+        "room.viewersPending" to ("观看人数：--" to "Viewers: --"),
+        "room.latency" to ("延迟≈%sms" to "Latency ≈ %sms"),
+        "room.latencyPending" to ("延迟≈--ms" to "Latency ≈ --ms"),
+        "room.notFound" to (
+            "直播不存在或已删除，已返回大厅" to
+                "This stream does not exist or was deleted; back to the lobby"
+            ),
+        "room.ended" to ("直播已结束，已返回大厅" to "The stream has ended; back to the lobby"),
+        "room.loadFailed" to ("直播间信息加载失败：%s" to "Failed to load the live room: %s"),
+        "room.host" to ("主播：%s" to "Host: %s"),
         // ------------------------------------------------------------ broadcast
         "broadcast.title" to ("创建直播" to "Create a Stream"),
         "broadcast.body" to (
@@ -333,7 +356,10 @@ object L10n {
             ),
         "broadcast.defaultScreenTitle" to ("我的屏幕直播" to "My screen stream"),
         "broadcast.defaultCameraTitle" to ("我的摄像头直播" to "My camera stream"),
-        "broadcast.qualityTitle" to ("画质设置（默认 720p / 24fps）" to "Quality (default 720p / 24fps)"),
+        "broadcast.qualityTitle" to (
+            "画质设置（1080p / 60fps 需服务器容量支持）" to
+                "Quality (1080p / 60 fps need server capacity)"
+            ),
         "broadcast.resolutionSaved" to (
             "分辨率已保存：%s（%s×%s，%s），下次开播生效" to
                 "Resolution saved: %s (%s×%s, %s). Applies to the next stream."
@@ -342,6 +368,36 @@ object L10n {
         "broadcast.qualitySummary" to (
             "当前：%s · %s×%s · %s · %s fps\n屏幕直播按竖屏 %s×%s 采集；摄像头直播按横屏 %s×%s 采集。" to
                 "Current: %s · %s×%s · %s · %s fps\nScreen capture uses portrait %s×%s; camera capture uses landscape %s×%s."
+            ),
+        // v0.7.9: before going live the app asks GET /api/capacity and gates 1080p / 60fps.
+        "broadcast.capacityTitle" to ("服务器能力" to "Server capacity"),
+        "broadcast.capacityAllowed" to (
+            "服务器资源充足：1080p / 60fps 可选" to
+                "Server has enough capacity: 1080p / 60 fps enabled"
+            ),
+        "broadcast.capacityChecking" to (
+            "正在检查服务器能力…" to
+                "Checking server capacity…"
+            ),
+        "broadcast.capacityDisabled" to (
+            "服务器资源不足，已禁用 1080p / 60fps：%s" to
+                "Not enough server capacity; 1080p / 60 fps disabled: %s"
+            ),
+        "broadcast.capacityUnavailable" to (
+            "无法获取服务器能力，暂时禁用 1080p / 60fps" to
+                "Server capacity unavailable; 1080p / 60 fps temporarily disabled"
+            ),
+        "broadcast.capacityLimited" to (
+            "CPU 核心、可用内存或当前直播数不满足要求" to
+                "CPU cores, free memory or the number of live rooms do not meet the requirement"
+            ),
+        "broadcast.highQualityReset" to (
+            "服务器不支持 1080p / 60fps，已恢复 720p / 24fps" to
+                "The server does not support 1080p / 60 fps; reverted to 720p / 24 fps"
+            ),
+        "broadcast.highQualityBlocked" to (
+            "服务器资源不足，无法启用 1080p / 60fps：%s" to
+                "Not enough server capacity for 1080p / 60 fps: %s"
             ),
         "broadcast.cameraBody" to (
             "摄像头默认关闭。开始直播时才请求摄像头权限；可在直播中切换前置/后置摄像头。" to
@@ -418,8 +474,8 @@ object L10n {
         "profile.logout" to ("退出登录" to "Sign out"),
         "profile.settings" to ("服务器设置" to "Server Settings"),
         "profile.serverBody" to (
-            "填写你的葱直播 API 根地址，例如 https://live.example.com 或 http://服务器IP:3000。" to
-                "Enter your CongLive API root URL, e.g. https://live.example.com or http://SERVER_IP:3000."
+            "填写你的葱直播服务器地址：可只填域名（自动补 https://，如 live.example.com），也可填 http://服务器IP:3000。" to
+                "Enter your CongLive server address: a bare domain works (live.example.com becomes https://…), or use http://SERVER_IP:3000."
             ),
         "profile.apiHint" to ("API 地址" to "API address"),
         "profile.saveServer" to ("保存服务器地址并检查连接" to "Save server address and check connection"),

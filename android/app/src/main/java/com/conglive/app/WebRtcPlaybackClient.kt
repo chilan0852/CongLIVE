@@ -1,13 +1,17 @@
 package com.conglive.app
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import org.webrtc.AudioTrack
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
-import android.util.Log
 import org.webrtc.EglBase
 import org.webrtc.RendererCommon
 import org.webrtc.IceCandidate
+import org.webrtc.RTCStatsCollectorCallback
+import org.webrtc.RTCStatsReport
 import org.webrtc.audio.JavaAudioDeviceModule
 import org.webrtc.MediaConstraints
 import org.webrtc.PeerConnection
@@ -25,6 +29,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 /** Native WHEP receiver for a single live stream. The renderer can be reattached
  * whenever MainActivity redraws its view hierarchy without renegotiating media.
@@ -42,6 +47,12 @@ class WebRtcPlaybackClient(
     private val lang: Lang = L10n.read(context),
     private val onStatus: (String) -> Unit,
 ) {
+    companion object {
+        /** v0.7.9: WHEP latency sampling period (getStats once per second). */
+        private const val STATS_INTERVAL_MS = 1_000L
+        private const val MAX_LATENCY_MS = 60_000
+    }
+
     /** Localized user-visible playback status (v0.7.7). */
     private fun tr(key: String, vararg args: Any?): String = L10n.t(lang, key, *args)
 
@@ -62,6 +73,23 @@ class WebRtcPlaybackClient(
     @Volatile private var closed = false
     @Volatile private var sessionThread: Thread? = null
     @Volatile private var pendingCall: Call? = null
+
+    // ------------------------------------------------------------------
+    // v0.7.9 latency monitor: every second read
+    // jitterBufferDelay / jitterBufferEmittedCount + RTT from getStats and
+    // report "latency ≈ Xms" to the room page. Only runs while the playback
+    // page is attached and is torn down by [close].
+    private val statsHandler = Handler(Looper.getMainLooper())
+    @Volatile private var statsRunning = false
+    @Volatile private var latencyListener: ((Int) -> Unit)? = null
+    @Volatile private var lastLatencyMillis = -1
+    private val statsRunnable = object : Runnable {
+        override fun run() {
+            if (closed || !statsRunning) return
+            pollLatency()
+            if (!closed && statsRunning) statsHandler.postDelayed(this, STATS_INTERVAL_MS)
+        }
+    }
 
     /** Internal control-flow exception: the session was closed while it was setting up. */
     private class SessionAborted : RuntimeException()
@@ -120,6 +148,83 @@ class WebRtcPlaybackClient(
             sessionThread = thread
             thread.start()
         }
+        // v0.7.9: start the 1 Hz latency sampler together with the session.
+        startStatsMonitoring()
+    }
+
+    /** v0.7.9: latency listener for the standalone room page (may be set later). */
+    fun setLatencyListener(listener: ((Int) -> Unit)?) {
+        latencyListener = listener
+        if (listener != null) startStatsMonitoring() else stopStatsMonitoring()
+    }
+
+    /** Last measured latency in milliseconds, -1 until the first getStats result. */
+    fun latencyMillis(): Int = lastLatencyMillis
+
+    private fun startStatsMonitoring() {
+        if (closed || statsRunning) return
+        statsRunning = true
+        statsHandler.post(statsRunnable)
+    }
+
+    private fun stopStatsMonitoring() {
+        statsRunning = false
+        statsHandler.removeCallbacksAndMessages(null)
+    }
+
+    /** Reads inbound video jitter-buffer delay and the nominated candidate pair RTT. */
+    private fun pollLatency() {
+        val connection = synchronized(lock) {
+            if (closed) null else peer
+        } ?: return
+        try {
+            connection.getStats(object : RTCStatsCollectorCallback {
+                override fun onStatsDelivered(report: RTCStatsReport) {
+                    if (closed) return
+                    val latency = computeLatencyMillis(report) ?: return
+                    lastLatencyMillis = latency
+                    latencyListener?.invoke(latency)
+                }
+            })
+        } catch (_: Exception) {
+            // The native peer may already be closing; the next tick is a no-op.
+        }
+    }
+
+    /**
+     * Latency estimate = average jitter-buffer delay (jitterBufferDelay /
+     * jitterBufferEmittedCount) + currentRoundTripTime of the nominated
+     * candidate pair, both in milliseconds.
+     */
+    private fun computeLatencyMillis(report: RTCStatsReport): Int? {
+        var jitterBufferMs: Double? = null
+        var rttMs: Double? = null
+        for (stats in report.statsMap.values) {
+            val members = stats.members
+            when (stats.type) {
+                "inbound-rtp" -> {
+                    if (jitterBufferMs != null) continue
+                    val kind = (members["kind"] as? String) ?: (members["mediaType"] as? String)
+                    if (kind != "video") continue
+                    val delaySeconds = (members["jitterBufferDelay"] as? Number)?.toDouble()
+                    val emitted = (members["jitterBufferEmittedCount"] as? Number)?.toDouble()
+                    if (delaySeconds != null && emitted != null && emitted > 0.0) {
+                        jitterBufferMs = delaySeconds / emitted * 1000.0
+                    }
+                }
+                "candidate-pair" -> {
+                    if (rttMs != null) continue
+                    val state = members["state"] as? String
+                    val nominated = members["nominated"] as? Boolean ?: false
+                    if (state != "succeeded" || !nominated) continue
+                    val rttSeconds = (members["currentRoundTripTime"] as? Number)?.toDouble()
+                    if (rttSeconds != null && rttSeconds >= 0.0) rttMs = rttSeconds * 1000.0
+                }
+            }
+        }
+        if (jitterBufferMs == null && rttMs == null) return null
+        val total = (jitterBufferMs ?: 0.0) + (rttMs ?: 0.0)
+        return total.roundToInt().coerceIn(0, MAX_LATENCY_MS)
     }
 
     private fun runSession() {
@@ -338,6 +443,9 @@ class WebRtcPlaybackClient(
     }
 
     fun close() {
+        // v0.7.9: stop the 1 Hz latency sampler before native objects are released.
+        latencyListener = null
+        stopStatsMonitoring()
         var thread: Thread? = null
         synchronized(lock) {
             if (closed) return
