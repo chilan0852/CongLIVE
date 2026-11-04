@@ -190,6 +190,15 @@ class MainActivity : AppCompatActivity() {
     private var capacityFetching = false
     private val capacityCallbacks = mutableListOf<() -> Unit>()
 
+    // ------------------------------------------------------------------
+    // v0.8.0: full-duplex voice room (audio-only mesh). Nothing is created until
+    // the user taps "Join voice": no microphone request, no PeerConnection.
+    private var chatSocketReady = false
+    private var voiceClient: VoiceRoomClient? = null
+    private var voiceSnapshot = VoiceSnapshot()
+    private var voicePendingJoin = false
+    private var voiceCardBody: LinearLayout? = null
+
     private var navButtons: MutableList<LinearLayout> = mutableListOf()
     private var pendingCoverStreamId: Long = 0L
     private var coverUploading = false
@@ -213,6 +222,21 @@ class MainActivity : AppCompatActivity() {
 
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCameraStreaming() else setStatus(tr("status.cameraDenied"))
+    }
+
+    /**
+     * v0.8.0: RECORD_AUDIO is requested by the room voice panel only. Opening a
+     * room page (or the lobby) never touches the microphone.
+     */
+    private val voiceMicPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            startVoiceJoin()
+        } else {
+            voicePendingJoin = false
+            voiceSnapshot = voiceSnapshot.copy(error = tr("voice.error.micDenied"))
+            fillVoiceCard()
+            setStatus(tr("voice.error.micDenied"))
+        }
     }
 
     /**
@@ -387,7 +411,7 @@ class MainActivity : AppCompatActivity() {
         })
         header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
-            text = "v0.7.9"
+            text = "v0.8.0"
             textSize = 10.5f
             setTextColor(0xFFD9CEFF.toInt())
             gravity = Gravity.CENTER
@@ -647,6 +671,9 @@ class MainActivity : AppCompatActivity() {
     private fun leaveRoom(message: String? = null) {
         if (roomStream == null) return
         stopRoomPolling()
+        // Release the voice mesh before the room WebSocket closes so voice-leave
+        // can still be delivered (the server also cleans up on socket close).
+        teardownVoice()
         stopLivePlayback()
         disconnectChat()
         roomStream = null
@@ -659,6 +686,7 @@ class MainActivity : AppCompatActivity() {
         roomViewersView = null
         roomChatBox = null
         roomStatusView = null
+        voiceCardBody = null
         if (!message.isNullOrBlank()) setStatus(message)
         applyChromeVisibility()
         render()
@@ -732,12 +760,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** The full-screen room: back / cover / title / host / WHEP player / viewers / latency / chat. */
+    /** The full-screen room: back / cover / title / host / WHEP player / viewers / latency / voice / chat. */
     private fun renderRoom(stream: LiveStream) {
         roomLatencyView = null
         roomViewersView = null
         roomChatBox = null
         roomStatusView = null
+        voiceCardBody = null
         val top = panel()
         val bar = horizontal()
         bar.addView(actionButton(tr("room.back"), false) { leaveRoom() })
@@ -773,6 +802,17 @@ class MainActivity : AppCompatActivity() {
         roomStatusView = notice
         top.addView(notice)
         content.addView(top, cardParams())
+
+        // v0.8.0 voice panel: the microphone/PeerConnections are only created after
+        // "Join voice"; the WHEP player above keeps its own independent audio path.
+        val voiceCard = panel()
+        voiceCard.addView(heading(tr("voice.title")))
+        voiceCard.addView(body(tr("voice.hint")))
+        val voiceBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        voiceCardBody = voiceBody
+        voiceCard.addView(voiceBody)
+        content.addView(voiceCard, cardParams())
+        fillVoiceCard()
 
         val chatCard = panel()
         chatCard.addView(heading(tr("chat.title")))
@@ -843,6 +883,173 @@ class MainActivity : AppCompatActivity() {
 
     private fun roomLatencyText(): String =
         if (roomLatencyMillis >= 0) tr("room.latency", roomLatencyMillis) else tr("room.latencyPending")
+
+    // ---------------------------------------------------------------------
+    // v0.8.0: full-duplex voice panel (audio-only WebRTC mesh)
+    // ---------------------------------------------------------------------
+
+    /** Rebuilds only the voice panel; the WHEP player and the chat list stay untouched. */
+    private fun fillVoiceCard() {
+        val box = voiceCardBody ?: return
+        box.removeAllViews()
+        val current = voiceSnapshot
+        val phaseText = when (current.phase) {
+            VoicePhase.IDLE -> tr("voice.idleBadge")
+            VoicePhase.CONNECTING -> tr("voice.connecting")
+            VoicePhase.JOINING -> tr("voice.joining")
+            VoicePhase.JOINED -> tr("voice.liveBadge")
+            VoicePhase.ERROR -> tr("voice.errorBadge")
+        }
+        val participantCount = current.peers.size + if (current.self != null) 1 else 0
+        box.addView(body("$phaseText · ${tr("voice.participants", participantCount)}"))
+        val error = current.error
+        if (!error.isNullOrBlank()) {
+            box.addView(TextView(this).apply {
+                text = error
+                textSize = 12f
+                setTextColor(RED)
+                setPadding(0, dp(4), 0, dp(6))
+            })
+        }
+        when (current.phase) {
+            VoicePhase.IDLE, VoicePhase.ERROR -> {
+                box.addView(
+                    actionButton(
+                        if (current.phase == VoicePhase.ERROR) tr("voice.retry") else tr("voice.join"),
+                        true
+                    ) { onJoinVoice() }
+                )
+                if (current.phase == VoicePhase.IDLE) box.addView(body(tr("voice.joinHint")))
+            }
+            VoicePhase.CONNECTING, VoicePhase.JOINING -> {
+                box.addView(actionButton(tr("voice.leave"), false) { leaveVoice() })
+            }
+            VoicePhase.JOINED -> {
+                val actions = horizontal()
+                actions.addView(
+                    actionButton(
+                        if (current.muted) tr("voice.unmute") else tr("voice.mute"),
+                        false
+                    ) { toggleVoiceMute() }.apply { isEnabled = current.self != null },
+                    weighted()
+                )
+                actions.addView(actionButton(tr("voice.leave"), false) { leaveVoice() }, weighted())
+                box.addView(actions)
+                val self = current.self
+                if (self != null) {
+                    addVoiceParticipant(
+                        box,
+                        self.username + tr("voice.you"),
+                        if (current.muted) tr("voice.mutedBadge") else tr("voice.connected"),
+                        !current.muted && current.localLevel > 0.06f
+                    )
+                }
+                val peers = current.peers.sortedBy { it.username }
+                if (peers.isEmpty()) {
+                    box.addView(body(tr("voice.empty")))
+                } else {
+                    peers.forEach { peer ->
+                        val stateText = when (current.peerStates[peer.peerId]) {
+                            VoicePeerState.CONNECTED -> tr("voice.connected")
+                            VoicePeerState.FAILED -> tr("voice.errorBadge")
+                            else -> tr("voice.connecting")
+                        }
+                        addVoiceParticipant(box, peer.username, stateText, current.speaking[peer.peerId] == true)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun addVoiceParticipant(box: LinearLayout, name: String, stateText: String, speaking: Boolean) {
+        val row = horizontal()
+        row.setPadding(0, dp(3), 0, dp(3))
+        row.addView(TextView(this).apply {
+            text = name.ifBlank { tr("chat.user") }
+            textSize = 13f
+            setTextColor(TEXT)
+            setTypeface(typeface, Typeface.BOLD)
+            maxLines = 1
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        if (speaking) {
+            row.addView(TextView(this).apply {
+                text = "🔊 ${tr("voice.speaking")}"
+                textSize = 11f
+                setTextColor(GREEN)
+                setPadding(dp(6), 0, dp(6), 0)
+            })
+        }
+        row.addView(TextView(this).apply {
+            text = stateText
+            textSize = 11f
+            setTextColor(MUTED)
+            setPadding(dp(6), 0, 0, 0)
+        })
+        box.addView(row)
+    }
+
+    /** RECORD_AUDIO is requested here (button tap) — never when a room page opens. */
+    private fun onJoinVoice() {
+        if (roomStream == null) return
+        if (voiceClient?.isActive() == true) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            voicePendingJoin = true
+            voiceMicPermission.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        startVoiceJoin()
+    }
+
+    private fun startVoiceJoin() {
+        if (roomStream == null) return
+        voicePendingJoin = false
+        if (!chatSocketReady || chatSocket == null) {
+            // The room WebSocket authenticates first; retry as soon as `ready` arrives.
+            voicePendingJoin = true
+            setStatus(tr("voice.joining"))
+            fillVoiceCard()
+            return
+        }
+        teardownVoice()
+        voiceSnapshot = VoiceSnapshot(phase = VoicePhase.CONNECTING)
+        fillVoiceCard()
+        val client = VoiceRoomClient(
+            this,
+            { payload -> sendVoiceSignal(payload) },
+            lang
+        ) { snapshot ->
+            voiceSnapshot = snapshot
+            fillVoiceCard()
+            snapshot.error?.let { setStatus(it) }
+        }
+        voiceClient = client
+        client.join()
+    }
+
+    private fun sendVoiceSignal(payload: JSONObject): Boolean {
+        val socket = chatSocket ?: return false
+        return socket.send(payload.toString())
+    }
+
+    private fun leaveVoice() {
+        voiceClient?.leave()
+        voiceClient = null
+        voicePendingJoin = false
+        voiceSnapshot = VoiceSnapshot()
+        fillVoiceCard()
+    }
+
+    private fun toggleVoiceMute() {
+        voiceClient?.toggleMute()
+    }
+
+    /** Releases the whole mesh: leave button, room switch, stream ended or destroy. */
+    private fun teardownVoice() {
+        voicePendingJoin = false
+        voiceClient?.dispose()
+        voiceClient = null
+        voiceSnapshot = VoiceSnapshot()
+    }
 
     private var chatSocketState = ""
 
@@ -1736,16 +1943,25 @@ class MainActivity : AppCompatActivity() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val data = JSONObject(text)
-                    when (data.optString("type")) {
+                    val messageType = data.optString("type")
+                    // v0.8.0: voice signaling rides the same authenticated room socket.
+                    if (messageType.startsWith("voice-")) {
+                        voiceClient?.handleSignal(data)
+                        return
+                    }
+                    when (messageType) {
                         "ready" -> {
                             val history = data.optJSONArray("messages") ?: JSONArray()
                             val messages = mutableListOf<ChatMessage>()
                             for (i in 0 until history.length()) messages.add(history.optJSONObject(i)?.toChatMessage() ?: continue)
                             runOnUiThread {
+                                chatSocketReady = true
                                 chatMessages = messages
                                 chatSocketState = tr("chat.connected")
                                 setStatus(tr("status.chatConnected", selectedStream?.title ?: tr("chat.room")))
                                 render()
+                                // A join tapped while the socket was authenticating resumes here.
+                                if (voicePendingJoin) startVoiceJoin()
                             }
                         }
                         "message" -> {
@@ -1782,6 +1998,10 @@ class MainActivity : AppCompatActivity() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 runOnUiThread {
+                    chatSocketReady = false
+                    // The server drops voice participants when the socket closes.
+                    teardownVoice()
+                    fillVoiceCard()
                     chatSocketState = if (code == 4403) L10n.serverError(lang, reason.ifBlank { tr("chat.roomUnavailable") }) else tr("chat.closed")
                     setStatus(chatSocketState)
                 }
@@ -1789,6 +2009,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 runOnUiThread {
+                    chatSocketReady = false
+                    teardownVoice()
+                    fillVoiceCard()
                     chatSocketState = tr("chat.connectFailed", t.message ?: tr("chat.networkError"))
                     setStatus(chatSocketState)
                 }
@@ -1797,6 +2020,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectChat() {
+        chatSocketReady = false
+        // Release the voice mesh before closing the socket it is signaling on.
+        teardownVoice()
         chatSocket?.close(1000, "user left room")
         chatSocket = null
         chatSocketState = tr("chat.disconnected")
@@ -2237,6 +2463,8 @@ class MainActivity : AppCompatActivity() {
         mainHandler.removeCallbacksAndMessages(null)
         stopRoomPolling()
         try { unregisterReceiver(statusReceiver) } catch (_: Exception) { }
+        // v0.8.0: release the voice mesh before the room socket is closed.
+        teardownVoice()
         disconnectChat()
         playerView?.player = null
         player?.release()
@@ -2252,6 +2480,7 @@ class MainActivity : AppCompatActivity() {
         roomViewersView = null
         roomChatBox = null
         roomStatusView = null
+        voiceCardBody = null
         CameraPreviewBridge.onStatus = null
         live2DViewer?.destroy()
         live2DViewer = null

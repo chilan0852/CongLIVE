@@ -15,6 +15,7 @@ const l10n = () => read('android/app/src/main/java/com/conglive/app/L10n.kt');
 const playbackClient = () => read('android/app/src/main/java/com/conglive/app/WebRtcPlaybackClient.kt');
 const live2dViewer = () => read('android/app/src/main/java/com/conglive/app/Live2DViewer.kt');
 const previewBridge = () => read('android/app/src/main/java/com/conglive/app/CameraPreviewBridge.kt');
+const voiceRoom = () => read('android/app/src/main/java/com/conglive/app/VoiceRoomClient.kt');
 
 test('Android manifest declares camera permission and camera foreground-service type', () => {
   const xml = read('android/app/src/main/AndroidManifest.xml');
@@ -133,12 +134,12 @@ test('ScreenStreamService applies settings: landscape camera, portrait screen, p
   assert.match(stream, /encoding\.maxFramerate = videoFps/);
 });
 
-test('Android package version is bumped to 0.7.9 (versionCode 21)', () => {
+test('Android package version is bumped to 0.8.0 (versionCode 22)', () => {
   const gradle = read('android/app/build.gradle.kts');
-  assert.match(gradle, /versionCode = 21/);
-  assert.match(gradle, /versionName = "0\.7\.9"/);
+  assert.match(gradle, /versionCode = 22/);
+  assert.match(gradle, /versionName = "0\.8\.0"/);
   // The in-app header shows the same version.
-  assert.match(activity(), /text = "v0\.7\.9"/);
+  assert.match(activity(), /text = "v0\.8\.0"/);
 });
 
 test('cover picking uses ACTION_OPEN_DOCUMENT and uploads a <=2MB imageData data URL', () => {
@@ -241,7 +242,7 @@ test('dictionary has zh/en for every screen and every key the app uses', () => {
   assert.match(l10nSrc, /"账号已被管理员封禁" to "The account has been banned by an administrator"/);
 
   // Every tr("…") / L10n.t("…") call site must resolve to a dictionary entry.
-  const sources = [activity(), service(), playbackClient(), live2dViewer(), previewBridge()];
+  const sources = [activity(), service(), playbackClient(), live2dViewer(), previewBridge(), voiceRoom()];
   const used = new Set();
   for (const src of sources) {
     for (const match of src.matchAll(/(?:tr|L10n\.t)\(\s*"([a-zA-Z0-9]+(?:\.[a-zA-Z0-9]+)+)"/g)) used.add(match[1]);
@@ -514,11 +515,134 @@ test('v0.7.9 only the active room polls/stats: no PeerConnection in the lobby', 
   // Polling and stats only exist in the room page and are stopped on leave/destroy.
   assert.match(screen, /private fun startRoomPolling\(\)/);
   assert.match(screen, /ROOM_POLL_INTERVAL_MS = 5_000L/);
-  assert.match(screen, /stopRoomPolling\(\)\s*\n\s*stopLivePlayback\(\)\s*\n\s*disconnectChat\(\)/);
+  assert.match(screen, /stopRoomPolling\(\)[\s\S]{0,400}?teardownVoice\(\)\s*\n\s*stopLivePlayback\(\)\s*\n\s*disconnectChat\(\)/);
   assert.match(screen, /mainHandler\.removeCallbacksAndMessages\(null\)\s*\n\s*stopRoomPolling\(\)/);
   // Lobby list refreshes never rebuild the open room page.
   assert.match(screen, /if \(currentTab == 0 && roomStream == null\) render\(\)/);
   // 1080p60 keeps 6 Mbps; the service clamps everything else to 2 Mbps or less.
   assert.match(videoSettings(), /const val LOW_BITRATE_CEILING = 2_000_000/);
   assert.match(service(), /\.effectiveBitrate\(configuredWidth, configuredHeight, videoFps, requestedBitrate\)/);
+});
+
+// ---------------------------------------------------------------------------
+// v0.8.0: full-duplex room voice (audio-only WebRTC mesh)
+// ---------------------------------------------------------------------------
+
+test('v0.8.0 voice signaling matches web/src/voice.ts and backend voice protocol', () => {
+  const voice = voiceRoom();
+  const screen = activity();
+  // C→S message types.
+  for (const type of ['voice-join', 'voice-leave', 'voice-offer', 'voice-answer', 'voice-candidate']) {
+    assert.ok(voice.includes(`"${type}"`), `VoiceRoomClient must send ${type}`);
+  }
+  // S→C message types handled from the room socket.
+  for (const type of ['voice-peers', 'voice-peer-joined', 'voice-peer-left', 'voice-offer', 'voice-answer', 'voice-candidate', 'voice-error']) {
+    assert.ok(voice.includes(`"${type}"`), `VoiceRoomClient must handle ${type}`);
+  }
+  // Relay payloads: {target, sdp:{type,sdp}} / {target, candidate:{candidate,sdpMid,sdpMLineIndex}}.
+  assert.match(voice, /\.put\("target", target\)/);
+  assert.match(voice, /\.put\("sdp", JSONObject\(\)\.put\("type", sdpType\)\.put\("sdp", sdp\)\)/);
+  assert.match(voice, /\.put\(\s*"candidate",\s*JSONObject\(\)/);
+  assert.match(voice, /\.put\("sdpMLineIndex", candidate\.sdpMLineIndex\)/);
+  // Peer records are {peerId,userId,username}; from/self/peers envelopes are decoded.
+  assert.match(voice, /optString\("peerId"/);
+  assert.match(voice, /optLong\("userId"/);
+  assert.match(voice, /optString\("username"/);
+  assert.match(voice, /optJSONObject\("from"\)/);
+  assert.match(voice, /optJSONObject\("self"\)/);
+  // Glare rule: the lexicographically smaller peerId sends the offer.
+  assert.match(voice, /self\.peerId < peer\.peerId/);
+  // Signaling rides the already authenticated room WS, not a new unauthenticated socket.
+  assert.match(screen, /messageType\.startsWith\("voice-"\)/);
+  assert.match(screen, /voiceClient\?\.handleSignal\(data\)/);
+});
+
+test('v0.8.0 voice mesh: mic only after join, one audio-only PC per peer, full release', () => {
+  const voice = voiceRoom();
+  const screen = activity();
+  // One PeerConnection per remote participant, publishing the single local mic track.
+  assert.match(voice, /private inner class PeerSession/);
+  assert.match(voice, /peers\[info\.peerId\] = session/);
+  assert.match(voice, /createPeerConnection\(config, createObserver\(session\)\)/);
+  assert.match(voice, /addTrack\(local, listOf\(AUDIO_STREAM_ID\)\)/);
+  assert.match(voice, /createAudioSource\(constraints\)/);
+  assert.match(voice, /createAudioTrack\(AUDIO_TRACK_ID, source\)/);
+  assert.match(voice, /JavaAudioDeviceModule\.builder/);
+  assert.match(voice, /googEchoCancellation/);
+  // The microphone and factory are created inside join() (after the explicit tap).
+  assert.match(voice, /fun join\(\)/);
+  assert.match(voice, /createAudioLocked\(\)/);
+  assert.match(voice, /voice-join/);
+  assert.ok(!/fun join\(\)[\s\S]*?createAudioLocked\(\)[\s\S]*?fun leave\(\)/.test(voice.replace(/createAudioLocked\(\)/g, '')),
+    'sanity: join body contains the capture call');
+  // Full release: voice-leave + close/dispose every PC + dispose tracks/factory/ADM/EglBase.
+  assert.match(voice, /fun leave\(\)/);
+  assert.match(voice, /fun dispose\(\)/);
+  assert.match(voice, /releaseNative\(\)/);
+  assert.match(voice, /pc\.close\(\)/);
+  assert.match(voice, /pc\.dispose\(\)/);
+  assert.match(voice, /localTrack\?\.dispose\(\)/);
+  assert.match(voice, /audioSource\?\.dispose\(\)/);
+  assert.match(voice, /factory\?\.dispose\(\)/);
+  assert.match(voice, /audioModule\?\.release\(\)/);
+  assert.match(voice, /eglBase\?\.release\(\)/);
+  // Remote audio is played by the WebRTC ADM (no surface renderer / no extra track).
+  assert.match(voice, /attachRemoteAudio/);
+  assert.doesNotMatch(voice, /SurfaceViewRenderer|addSink/);
+  // Activity requests the microphone only from the join action and tears down on leave/destroy.
+  assert.match(screen, /private val voiceMicPermission = registerForActivityResult/);
+  assert.match(screen, /Manifest\.permission\.RECORD_AUDIO/);
+  assert.match(screen, /private fun onJoinVoice\(\)/);
+  assert.match(screen, /private fun startVoiceJoin\(\)/);
+  assert.match(screen, /private fun leaveVoice\(\)/);
+  assert.match(screen, /private fun teardownVoice\(\)/);
+  assert.equal((screen.match(/VoiceRoomClient\(/g) ?? []).length, 1, 'only the join path constructs the voice client');
+  assert.match(screen, /client\.join\(\)/);
+  // Leaving the room releases the mesh before the WS closes.
+  const leaveRoomBody = screen.slice(screen.indexOf('private fun leaveRoom'), screen.indexOf('private fun startRoomPolling'));
+  const voiceDownAt = leaveRoomBody.indexOf('teardownVoice()');
+  const wsDownAt = leaveRoomBody.indexOf('disconnectChat()');
+  assert.ok(voiceDownAt > 0 && wsDownAt > voiceDownAt, 'voice mesh must be released before the room socket closes');
+  assert.match(screen, /stopRoomPolling\(\)[\s\S]*?teardownVoice\(\)/);
+});
+
+test('v0.8.0 voice panel shows participants/speaking, mute and zh/en messages without touching the player', () => {
+  const screen = activity();
+  const voice = voiceRoom();
+  const l10nSrc = l10n();
+  // Room page renders the voice card and only rebuilds that card on snapshots.
+  assert.match(screen, /private fun fillVoiceCard\(\)/);
+  assert.match(screen, /private fun addVoiceParticipant\(/);
+  assert.match(screen, /heading\(tr\("voice\.title"\)\)/);
+  assert.match(screen, /tr\("voice\.participants"/);
+  assert.match(screen, /tr\("voice\.speaking"/);
+  assert.match(screen, /tr\("voice\.join"\)/);
+  assert.match(screen, /tr\("voice\.mute"\)/);
+  assert.match(screen, /tr\("voice\.unmute"\)/);
+  assert.match(screen, /tr\("voice\.leave"\)/);
+  assert.match(screen, /private fun toggleVoiceMute\(\)/);
+  // Remote speaking state comes from getStats audioLevel / totalAudioEnergy; the
+  // local level is computed from the ADM PCM samples (no second AudioRecord).
+  assert.match(voice, /STATS_INTERVAL_MS = 500L/);
+  assert.match(voice, /getStats\(/);
+  assert.match(voice, /"audioLevel"/);
+  assert.match(voice, /"totalAudioEnergy"/);
+  assert.match(voice, /SPEAKING_THRESHOLD/);
+  assert.match(voice, /setSamplesReadyCallback/);
+  assert.match(voice, /updateMicLevel/);
+  assert.match(voice, /AudioRecordErrorCallback/);
+  assert.match(voice, /reportMicError/);
+  // A second factory/ADM keeps the room WHEP player's audio path independent.
+  assert.match(voice, /setAudioDeviceModule\(adm\)/);
+  assert.match(voice, /PeerConnectionFactory\.builder\(\)/);
+  // Bilingual dictionary entries for the whole panel + errors.
+  for (const key of [
+    'voice.title', 'voice.hint', 'voice.join', 'voice.joining', 'voice.leave', 'voice.mute',
+    'voice.unmute', 'voice.mutedBadge', 'voice.liveBadge', 'voice.participants', 'voice.speaking',
+    'voice.empty', 'voice.retry', 'voice.error.micDenied', 'voice.error.micFailed',
+    'voice.error.connectFailed', 'voice.error.auth', 'voice.error.notJoined',
+    'voice.error.targetLeft', 'voice.error.invalidSignal', 'voice.error.rateLimited', 'voice.error.signal'
+  ]) {
+    assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
+  }
 });

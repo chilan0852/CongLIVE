@@ -1,4 +1,4 @@
-# CongLive Android v0.7.9 — 独立直播间 + 1080p60 容量门控 + 延迟监控 + 域名服务器
+# CongLive Android v0.8.0 — 独立直播间 + 全双工语音房 + 1080p60 容量门控 + 延迟监控 + 域名服务器
 
 Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观看使用 WHEP；保留账号、个人直播、WebSocket 弹幕和 MP4 录像播放。
 
@@ -20,6 +20,7 @@ Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观�
   - 摄像头直播按横屏尺寸采集，屏幕直播按竖屏尺寸采集（服务端交换宽高），码率与帧率写入视频 RTP sender。
 - 大厅点击直播卡片进入**独立直播间页面**（全屏替代大厅）：返回按钮、封面/标题/主播、WHEP 播放器、实时弹幕、观看人数；`GET /api/streams/:id` 轮询 + WebSocket `viewers` 更新人数，直播结束或 404 自动回大厅。
 - WHEP 播放每秒通过 `getStats` 读取 `jitterBufferDelay / jitterBufferEmittedCount` 与 `currentRoundTripTime`，在房间页显示「延迟≈Xms」；停止播放/离开房间即停止采样并释放 PeerConnection。
+- **全双工语音房（v0.8.0）**：独立直播间内可「加入语音」，加入时才申请 RECORD_AUDIO 并采集麦克风；基于已登录房间 WebSocket 的 voice 信令协议（与 Web 端 `web/src/voice.ts` 对齐），每个远端参与者一个 audio-only PeerConnection（mesh），小 peerId 发 offer；房间页显示参与者/说话状态，支持静音与离开；离开、切房、下播或销毁时释放全部 PC/麦克风/监听。
 - 麦克风由 `org.webrtc.audio.JavaAudioDeviceModule` 提供。
 - WHEP 客户端接收音视频，直播不使用 HLS/HTTP-FLV。
 - WebSocket 弹幕、个人录像列表、Media3 MP4 回放保留。
@@ -113,3 +114,14 @@ gradle :app:assembleDebug
 - **性能**：直播间之外不创建 PeerConnection、不轮询房间详情、不启动 getStats；大厅刷新不会重建房间页；1080p60 之外不上高码率。
 - **保留 0.7.8 的图标 / 中英双语 / 摄像头预览与 setZOrderOnTop / init-before-addView 修复**。
 - **版本**：versionCode 21 / versionName 0.7.9，minSdk 29 / targetSdk 34。
+
+## v0.8.0 新增（全双工语音房）
+
+- **房间语音入口**：独立直播间新增「语音房」卡片：未加入时只有「加入语音」；点击后才申请 `RECORD_AUDIO` 并打开麦克风，未加入前不创建 PeerConnection、不占用麦克风。
+- **信令协议**：复用已登录房间的 `/ws/chat` WebSocket（auth → ready 后），消息与 Web 端 `web/src/voice.ts`、后端 `backend/src/voice.js` 完全一致：
+  `voice-join` / `voice-leave` / `voice-offer` / `voice-answer` / `voice-candidate`（带 `target` peerId）↔ `voice-peers` / `voice-peer-joined` / `voice-peer-left` / `voice-offer/answer/candidate`（带 `from`）/ `voice-error`。
+- **Mesh 与 glare**：每个远端参与者一个 audio-only PeerConnection，本地麦克风音轨发布到每条连接；只有 peerId 字典序较小的一方主动发 offer，避免双方同时 offer 的冲突。远端音轨由 WebRTC AudioDeviceModule 自动播放，与房间内 WHEP 播放器使用各自独立的 Factory/ADM，互不冲突。
+- **参与者与说话状态**：房间页显示参与者列表与连接状态；每 500ms 通过 `getStats` 的 `audioLevel`（缺省时回退 `totalAudioEnergy`）计算远端说话状态与本地麦克风音量，说话者标「🔊 说话中」。
+- **静音 / 离开 / 清理**：支持静音 / 取消静音；离开语音、切换/退出直播间、直播结束、WS 断开或 Activity 销毁时发送 `voice-leave`，关闭所有 PeerConnection、释放 AudioTrack/AudioSource/ADM/EglBase 与信令监听。
+- **中英双语**：语音房所有按钮、状态、错误（麦克风拒绝/占用/未找到、信令错误、限流等）均加入 L10n 字典。
+- **版本**：versionCode 22 / versionName 0.8.0，minSdk 29 / targetSdk 34。0.7.9 的独立房间、1080p60 门控、延迟监控、域名服务器、图标与双语全部保留。

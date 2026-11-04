@@ -95,7 +95,7 @@ APK output: `android/app/build/outputs/apk/debug/app-debug.apk`. In the app, ope
 ### Android APK download
 
 - [Latest release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.7.9` room/latency APK: `com.conglive.app` / versionCode 21 / minSdk 29 / targetSdk 34
+- `v0.8.0` room voice APK: `com.conglive.app` / versionCode 22 / minSdk 29 / targetSdk 34
 - No Live2D models are bundled; the APK is for testing.
 
 ## Plugin extensions

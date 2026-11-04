@@ -599,6 +599,83 @@ object L10n {
                 "WHIP signalling complete; establishing the media connection…"
             ),
         "svc.videoSourceMissing" to ("视频源尚未初始化" to "The video source is not initialized"),
+        // -------------------------------------------------- voice room (v0.8.0)
+        "voice.title" to ("语音房" to "Voice room"),
+        "voice.hint" to (
+            "加入后才申请麦克风，并与房内其他听众建立点对点全双工音频；离开会释放麦克风和所有连接。" to
+                "The microphone is requested only after you join, then you get point-to-point full-duplex audio with the other listeners. Leaving releases the microphone and every connection."
+            ),
+        "voice.join" to ("加入语音" to "Join voice"),
+        "voice.joining" to ("正在加入语音…" to "Joining voice…"),
+        "voice.leave" to ("离开语音" to "Leave voice"),
+        "voice.mute" to ("静音" to "Mute"),
+        "voice.unmute" to ("取消静音" to "Unmute"),
+        "voice.mutedBadge" to ("已静音" to "Muted"),
+        "voice.liveBadge" to ("语音中" to "In voice"),
+        "voice.idleBadge" to ("未加入" to "Not joined"),
+        "voice.errorBadge" to ("语音错误" to "Voice error"),
+        "voice.connecting" to ("连接中…" to "Connecting…"),
+        "voice.connected" to ("已连接" to "Connected"),
+        "voice.speaking" to ("说话中" to "Speaking"),
+        "voice.participants" to ("参与者 %s 人" to "%s participant(s)"),
+        "voice.you" to ("（你）" to " (you)"),
+        "voice.empty" to (
+            "还没有其他参与者；分享房间给听众，他们加入语音后即可全双工通话。" to
+                "No other participants yet. Share the room; listeners can talk full-duplex once they join voice."
+            ),
+        "voice.joinHint" to (
+            "点击「加入语音」前不会创建 PeerConnection，也不会占用麦克风。" to
+                "No PeerConnection is created and the microphone is untouched until you tap Join voice."
+            ),
+        "voice.retry" to ("重新加入" to "Rejoin"),
+        "voice.error.micDenied" to (
+            "麦克风权限被拒绝：请允许麦克风后重试。" to
+                "Microphone permission was denied. Allow it and try again."
+            ),
+        "voice.error.micNotFound" to ("未找到可用的麦克风设备。" to "No microphone device was found."),
+        "voice.error.micBusy" to (
+            "麦克风被其他程序占用，请关闭后重试。" to
+                "The microphone is in use by another app. Close it and try again."
+            ),
+        "voice.error.micUnsupported" to (
+            "当前设备不支持麦克风采集，无法加入语音。" to
+                "This device does not support microphone capture, so voice is unavailable."
+            ),
+        "voice.error.micFailed" to ("获取麦克风失败：%s" to "Could not access the microphone: %s"),
+        "voice.error.connectFailed" to (
+            "语音连接失败，请检查网络后重试。" to
+                "Voice connection failed. Check your network and try again."
+            ),
+        "voice.error.auth" to (
+            "登录状态已失效，请重新登录后再加入语音。" to
+                "Your session has expired. Sign in again before joining voice."
+            ),
+        "voice.error.disconnected" to (
+            "语音连接已断开，请重新加入。" to
+                "The voice connection was closed. Please rejoin."
+            ),
+        "voice.error.notJoined" to (
+            "语音尚未加入房间，请重新加入。" to
+                "Voice has not joined the room yet. Please rejoin."
+            ),
+        "voice.error.targetLeft" to ("对方已离开语音房。" to "The other participant has left the voice room."),
+        "voice.error.invalidSignal" to (
+            "语音信令格式错误，已忽略。" to
+                "The voice signal was invalid and has been ignored."
+            ),
+        "voice.error.signalTooLarge" to (
+            "语音信令过大，已被服务器拒绝。" to
+                "The voice signal was too large and was rejected by the server."
+            ),
+        "voice.error.rateLimited" to (
+            "语音信令过于频繁，请稍后重试。" to
+                "Voice signals are being sent too fast; try again shortly."
+            ),
+        "voice.error.signal" to ("语音信令错误。" to "Voice signaling error."),
+        "voice.error.peerFailed" to (
+            "与某位参与者的音频连接失败，可尝试离开后重新加入。" to
+                "The audio connection to a participant failed; leave and rejoin to retry."
+            ),
         // ------------------------------------------------------------ playback
         "playback.firstFrame" to ("已收到视频首帧" to "First video frame received"),
         "playback.peerCreateFailed" to ("无法创建 WebRTC 播放连接" to "Could not create the WebRTC playback connection"),

@@ -85,7 +85,7 @@ npm run build      # 或 npm run dev
 ### Android APK 下载
 
 - [最新 Release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.7.9` 独立房间/1080p60/延迟 APK：`com.conglive.app` / code 21 / minSdk 29 / targetSdk 34
+- `v0.8.0` 房间全双工语音 APK：`com.conglive.app` / code 22 / minSdk 29 / targetSdk 34
 - 仓库不包含 Live2D 模型；APK 仅用于测试安装。
 
 ### Android
