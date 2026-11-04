@@ -73,7 +73,7 @@ npm run build      # 或 npm run dev
 ### Android APK 下载
 
 - [最新 Release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.7.7` 中文/English APK：`com.conglive.app` / code 19 / minSdk 29 / targetSdk 34
+- `v0.7.8` 新图标 APK：`com.conglive.app` / code 20 / minSdk 29 / targetSdk 34
 - 仓库不包含 Live2D 模型；APK 仅用于测试安装。
 
 ### Android

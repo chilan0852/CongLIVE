@@ -132,8 +132,8 @@ test('ScreenStreamService applies settings: landscape camera, portrait screen, p
 
 test('Android package version is bumped to 0.7.7 (versionCode 19)', () => {
   const gradle = read('android/app/build.gradle.kts');
-  assert.match(gradle, /versionCode = 19/);
-  assert.match(gradle, /versionName = "0\.7\.7"/);
+  assert.match(gradle, /versionCode = 20/);
+  assert.match(gradle, /versionName = "0\.7\.8"/);
   // The in-app header shows the same version.
   assert.match(activity(), /text = "v0\.7\.7"/);
 });

@@ -13,6 +13,8 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/AppTheme"
         android:label="葱直播"
         android:usesCleartextTraffic="true">
