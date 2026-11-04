@@ -1,4 +1,5 @@
 /** Stream cover helpers: client-side compression + upload to the backend API. */
+import { LocalizedError, backendText, msg } from './i18n';
 
 /** The backend rejects any decoded cover bigger than 2MB. */
 export const MAX_COVER_BYTES = 2 * 1024 * 1024;
@@ -49,7 +50,7 @@ async function decodeImage(file: Blob): Promise<ImageBitmap | HTMLImageElement> 
     return await new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image();
       image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('无法解码这张图片，请换一张 JPG/PNG/WebP 图片'));
+      image.onerror = () => reject(new LocalizedError(msg('cover.decodeFailed')));
       image.src = objectUrl;
     });
   } finally {
@@ -63,18 +64,18 @@ async function decodeImage(file: Blob): Promise<ImageBitmap | HTMLImageElement> 
  * stay below 2MB (the encoded data URI length is checked, not just the file).
  */
 export async function prepareCover(file: File): Promise<PreparedCover> {
-  if (!file) throw new Error('请选择一张图片');
+  if (!file) throw new LocalizedError(msg('cover.pick'));
   if (file.type && !ACCEPTED_MIME.test(file.type)) {
-    throw new Error('仅支持 JPG / PNG / WebP 图片');
+    throw new LocalizedError(msg('cover.badType'));
   }
   if (file.size > MAX_SOURCE_BYTES) {
-    throw new Error('原图超过 30MB，请先压缩或换一张更小的图片');
+    throw new LocalizedError(msg('cover.tooLarge'));
   }
   const bitmap = await decodeImage(file);
   const sourceWidth = 'width' in bitmap ? bitmap.width : 0;
   const sourceHeight = 'height' in bitmap ? bitmap.height : 0;
   if (!sourceWidth || !sourceHeight) {
-    throw new Error('图片尺寸无效，请换一张图片');
+    throw new LocalizedError(msg('cover.badSize'));
   }
 
   let maxSide = 1600;
@@ -88,7 +89,7 @@ export async function prepareCover(file: File): Promise<PreparedCover> {
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext('2d');
-    if (!context) throw new Error('浏览器无法创建画布，封面压缩失败');
+    if (!context) throw new LocalizedError(msg('cover.canvasUnavailable'));
     // JPEG has no alpha channel: paint the dark app background first.
     context.fillStyle = '#0b1122';
     context.fillRect(0, 0, width, height);
@@ -112,7 +113,7 @@ export async function prepareCover(file: File): Promise<PreparedCover> {
     try { bitmap.close(); } catch { /* already closed */ }
   }
   if (!last) {
-    throw new Error('图片无法压缩到 2MB 以内，请换一张尺寸更小或色彩更简单的图片');
+    throw new LocalizedError(msg('cover.compressFailed'));
   }
   return last;
 }
@@ -143,11 +144,14 @@ export async function uploadCover(
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(data?.error || `封面上传失败（HTTP ${response.status}）`);
+    throw new LocalizedError(msg('cover.uploadFailed', {
+      status: response.status,
+      detail: backendText(String(data?.error || ''), response.status),
+    }));
   }
   const coverUrl = data?.coverUrl || data?.cover_url;
   if (typeof coverUrl !== 'string' || !coverUrl) {
-    throw new Error('封面上传响应缺少 coverUrl');
+    throw new LocalizedError(msg('cover.missingUrl'));
   }
   return coverUrl;
 }

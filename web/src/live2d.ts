@@ -8,13 +8,14 @@
  */
 import { useSyncExternalStore } from 'react';
 import type { Application } from 'pixi.js';
+import { LocalizedError, errorMessage, msg, rawText, t, type TextMessage } from './i18n';
 
 export type Live2DPhase = 'idle' | 'core' | 'model' | 'ready' | 'error';
 
 export type Live2DState = {
   phase: Live2DPhase;
-  /** Human readable status / error message shown next to the loader. */
-  message: string;
+  /** Translatable status / error message shown next to the loader. */
+  message: TextMessage;
   /** URL of the currently loaded (or last attempted) model. */
   modelUrl: string;
   hasModel: boolean;
@@ -23,7 +24,7 @@ export type Live2DState = {
 
 const INITIAL_STATE: Live2DState = {
   phase: 'idle',
-  message: '输入 .model3.json 地址后点击「加载看板娘」（模型从网络加载，不内置任何模型）',
+  message: msg('live2d.initial'),
   modelUrl: '',
   hasModel: false,
   visible: true,
@@ -100,9 +101,9 @@ function loadScript(url: string, timeoutMs = 20000): Promise<void> {
         resolve();
       }
     };
-    const timer = window.setTimeout(() => finish(new Error('加载超时')), timeoutMs);
+    const timer = window.setTimeout(() => finish(new LocalizedError(msg('live2d.timeout'))), timeoutMs);
     script.onload = () => finish();
-    script.onerror = () => finish(new Error('脚本加载失败'));
+    script.onerror = () => finish(new LocalizedError(msg('live2d.scriptFailed')));
     if (!existing) document.head.appendChild(script);
   });
 }
@@ -122,10 +123,7 @@ async function ensureCubismCore(): Promise<void> {
         if (hasCubismCore()) return;
         failures.push(url);
       }
-      throw new Error(
-        'Cubism Core 加载失败：无法从 CDN 获取 live2dcubismcore.js。'
-        + '请检查网络 / 广告拦截插件，或换一个能访问 cubism.live2d.com 的网络后重试。',
-      );
+      throw new LocalizedError(msg('live2d.coreFailed'));
     })();
   }
   try {
@@ -139,45 +137,42 @@ async function ensureCubismCore(): Promise<void> {
 /** Accept only http(s) or same-origin paths that point at a Cubism 3+ model. */
 export function normalizeModelUrl(raw: string): string {
   const value = raw.trim();
-  if (!value) throw new Error('请输入 Live2D 模型地址（以 .model3.json 结尾）');
+  if (!value) throw new LocalizedError(msg('live2d.urlRequired'));
   let url: URL;
   try {
     url = new URL(value, window.location.href);
   } catch {
-    throw new Error('模型地址格式不正确，请填写完整的 http(s) URL');
+    throw new LocalizedError(msg('live2d.urlInvalid'));
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('模型地址必须是 http(s) 链接或以 / 开头的站内路径');
+    throw new LocalizedError(msg('live2d.urlProtocol'));
   }
   if (!/\.model3\.json$/i.test(url.pathname)) {
-    throw new Error('模型地址应以 .model3.json 结尾（例如 https://example.com/model/model3.json）');
+    throw new LocalizedError(msg('live2d.urlSuffix'));
   }
   return url.href;
 }
 
-function modelLabel(url: string): string {
+function modelLabel(url: string): string | null {
   try {
     const parsed = new URL(url, window.location.href);
-    const file = parsed.pathname.split('/').filter(Boolean).pop() || parsed.hostname;
-    return file;
+    return parsed.pathname.split('/').filter(Boolean).pop() || parsed.hostname;
   } catch {
-    return '模型';
+    return null;
   }
 }
 
-function describeLoadError(error: unknown): string {
+function describeLoadError(error: unknown): TextMessage {
   const name = String((error as any)?.name || '');
   const raw = String((error as any)?.message || error || '');
-  if (/Cubism Core/i.test(raw)) return raw;
-  if (/WebGL|context/i.test(raw)) {
-    return '加载 Live2D 失败：当前浏览器无法创建 WebGL 上下文（可能是硬件加速被禁用），请开启浏览器硬件加速后重试。';
-  }
+  if (/Cubism Core/i.test(raw)) return rawText(raw);
+  if (/WebGL|context/i.test(raw)) return msg('live2d.webgl');
   const detail = (raw || name).replace(/[.。\s]+$/, '').slice(0, 120);
+  const detailText: TextMessage = detail ? rawText(detail) : msg('common.unknownError');
   if (/NetworkError|Failed to fetch|fetch|404|Load|缺省|missing|texture/i.test(`${name} ${raw}`)) {
-    return `模型加载失败：无法读取 .model3.json 或其贴图/动作文件（${detail || '网络错误'}）。`
-      + '请确认地址可访问、文件完整，并且允许跨域（CORS）；远程模型需服务器返回 Access-Control-Allow-Origin。';
+    return msg('live2d.network', { detail: detailText });
   }
-  return `模型加载失败：${detail || '未知错误'}。请检查模型地址、贴图/动作文件是否完整，以及 CDN 是否允许跨域。`;
+  return msg('live2d.loadFailed', { detail: detailText });
 }
 
 function layoutRuntime(current: Live2DRuntime) {
@@ -232,15 +227,24 @@ export async function loadLive2D(host: HTMLElement | null, rawUrl: string): Prom
   try {
     url = normalizeModelUrl(rawUrl);
   } catch (error) {
-    setState({ phase: 'error', message: (error as Error).message, hasModel: !!runtime, visible: state.visible });
+    setState({
+      phase: 'error',
+      message: errorMessage(error, msg('common.unknownError')),
+      hasModel: !!runtime,
+      visible: state.visible,
+    });
     return;
   }
   loading = true;
   let app: Application | null = null;
   try {
-    setState({ phase: 'core', message: '正在从 CDN 加载 Cubism Core…', modelUrl: url, visible: state.visible });
+    setState({ phase: 'core', message: msg('live2d.loadingCore'), modelUrl: url, visible: state.visible });
     await ensureCubismCore();
-    setState({ phase: 'model', message: `Cubism Core 就绪，正在加载 ${modelLabel(url)}…`, modelUrl: url });
+    setState({
+      phase: 'model',
+      message: msg('live2d.coreReady', { model: modelLabel(url) ?? msg('live2d.modelFallback') }),
+      modelUrl: url,
+    });
     const [pixi, live2d] = await Promise.all([
       import('pixi.js'),
       import('pixi-live2d-display/cubism4'),
@@ -258,7 +262,7 @@ export async function loadLive2D(host: HTMLElement | null, rawUrl: string): Prom
       premultipliedAlpha: true,
       preserveDrawingBuffer: true,
     });
-    if (!gl) throw new Error('无法创建 WebGL 上下文');
+    if (!gl) throw new LocalizedError(msg('live2d.webgl'));
     app = new pixi.Application({
       view: glCanvas,
       context: gl as any,
@@ -277,7 +281,7 @@ export async function loadLive2D(host: HTMLElement | null, rawUrl: string): Prom
     canvas.style.width = '100%';
     canvas.style.height = '100%';
     canvas.style.display = state.visible ? 'block' : 'none';
-    canvas.setAttribute('aria-label', 'Live2D 看板娘画布');
+    canvas.setAttribute('aria-label', t('live2d.canvasLabel'));
     host.replaceChildren(canvas);
 
     const model = await live2d.Live2DModel.from(url, {
@@ -307,7 +311,11 @@ export async function loadLive2D(host: HTMLElement | null, rawUrl: string): Prom
     window.addEventListener('resize', current.windowResize);
     setState({
       phase: 'ready',
-      message: `模型已加载：${modelLabel(url)}（${Math.round(Number(model.width) || 0)}×${Math.round(Number(model.height) || 0)}）`,
+      message: msg('live2d.loaded', {
+        model: modelLabel(url) ?? msg('live2d.modelFallback'),
+        width: Math.round(Number(model.width) || 0),
+        height: Math.round(Number(model.height) || 0),
+      }),
       hasModel: true,
       visible: state.visible,
       modelUrl: url,
@@ -320,7 +328,7 @@ export async function loadLive2D(host: HTMLElement | null, rawUrl: string): Prom
     try { host.replaceChildren(); } catch { /* host unmounted */ }
     setState({
       phase: 'error',
-      message: describeLoadError(error),
+      message: error instanceof LocalizedError ? error.text : describeLoadError(error),
       hasModel: false,
       modelUrl: url,
     });
@@ -370,7 +378,7 @@ export function hasLive2DModel(): boolean {
 
 export function unloadLive2D(): void {
   destroyRuntime();
-  setState({ phase: 'idle', hasModel: false, message: '已卸载看板娘，可重新输入模型地址加载' });
+  setState({ phase: 'idle', hasModel: false, message: msg('live2d.unloaded') });
 }
 
 export function getLive2DModelUrl(): string {

@@ -25,6 +25,14 @@
 - Web 推流 Live2D 叠加：开播卡片可勾选「叠加 Live2D 看板娘」。有模型时用隐藏 `<video>` + 2D Canvas 逐帧合成相机/屏幕画面与模型画布，`canvas.captureStream()` 产生视频轨并通过 `sender.replaceTrack()` 替换原视频轨（音频轨保留，推流中可热开关）；没有模型时保持原始画面并提示。
 - 新增模块：`src/cover.ts`（封面压缩/上传）、`src/live2d.ts`（模型加载器）、`src/overlay.ts`（画面合成）。
 
+## 中英双语切换（i18n）
+
+- `src/i18n.ts` 提供完整 `zh` / `en` 两套字典、`t(key, params)`（`{name}` 占位符）、`useLang()` / `setLang()` 与 `translateMessage()`。
+- 语言选择顺序：`localStorage["conglive.lang"]` → `navigator.language`（中文环境默认中文，其余默认英文）。顶栏「中文 / English」切换即时重渲染，并同步 `<html lang>` 与 `document.title`。
+- `main.tsx` 的全部用户可见文案（品牌、导航、大厅、WHEP/WHIP 状态与错误、登录注册、开播、封面、Live2D、弹幕、空状态、按钮、`title`/`aria-label`）均走字典；动态值使用占位符。
+- `live2d.ts` / `cover.ts` / `overlay.ts` 的用户提示通过 `LocalizedError` + `TextMessage` 描述符传递，在渲染时才翻译，因此刷新语言后已产生的状态/错误文本也会跟着切换。
+- 后端中文错误在英文界面下做客户端映射（401/403/404/409/413/429/502/504 与“需要登录 / 主播尚未开播 / 直播间不存在”等常见提示）；无法识别的错误保留原文。
+
 ## 本地开发
 
 Node.js 20+：

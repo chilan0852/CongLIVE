@@ -16,6 +16,7 @@
 - **浏览器开播**：React + TypeScript，`getUserMedia` / `getDisplayMedia` → WHIP，分辨率/帧率选择，实时预览。
 - **Web 观看**：WHEP 低延迟播放、直播大厅、登录注册、实时弹幕。
 - **直播间能力**：自定义封面（上传/压缩/展示）、弹幕、SRS RTC→RTMP DVR 录像、后台管理。
+- **中英双语**：Web、Android 和管理后台均可在中文 / English 之间即时切换并记住选择。
 - **插件扩展**：后端插件管理器、事件钩子（直播创建/开播/下播）、管理后台插件开关、内置 `welcome` / `stream-audit` 示例。
 - **Live2D 加载器**：Web 与 Android 均可加载用户自备的 `.model3.json`；Web 推流支持把模型合成进画面。仓库不内置任何模型资源。
 

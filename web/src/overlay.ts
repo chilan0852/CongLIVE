@@ -5,6 +5,7 @@
  * and exposes it as a `captureStream()` video track, so the existing WHIP
  * publisher can swap only the video track (audio is kept untouched).
  */
+import { LocalizedError, msg } from './i18n';
 import { renderLive2DToCanvas } from './live2d';
 
 export type OverlayHandle = {
@@ -44,7 +45,7 @@ export function createOverlayStream(
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('浏览器无法创建 2D 画布，Live2D 叠加不可用');
+  if (!context) throw new LocalizedError(msg('overlay.canvasUnavailable'));
   const fps = Math.min(60, Math.max(1, Math.round(options.fps) || 30));
   const modelScale = options.modelScale ?? 0.55;
 
@@ -91,7 +92,7 @@ export function createOverlayStream(
   } catch (error) {
     window.cancelAnimationFrame(frameHandle);
     stopped = true;
-    throw error instanceof Error ? error : new Error('浏览器不支持 canvas.captureStream，无法叠加 Live2D');
+    throw error instanceof LocalizedError ? error : new LocalizedError(msg('overlay.captureUnsupported'));
   }
 
   const stop = () => {

@@ -19,6 +19,10 @@ import java.util.WeakHashMap
  *   renderer; it is idempotent and never releases the same renderer twice. */
 object CameraPreviewBridge {
     @Volatile private var activeTrack: VideoTrack? = null
+    /** v0.7.7: language for the user-visible preview status. */
+    @Volatile private var language: Lang = Lang.fromSystem()
+    /** Optional localized status sink wired by [MainActivity]. */
+    @Volatile var onStatus: ((String) -> Unit)? = null
     @Volatile private var sharedEglContext: EglBase.Context? = null
     @Volatile private var mirrorPreview: Boolean = true
     private var attachedRenderer: SurfaceViewRenderer? = null
@@ -28,6 +32,17 @@ object CameraPreviewBridge {
      * this from leaking the views after the Activity drops them. */
     private val releasedRenderers: MutableSet<SurfaceViewRenderer> =
         Collections.newSetFromMap(WeakHashMap<SurfaceViewRenderer, Boolean>())
+
+    /** v0.7.7: keeps the preview status in the language selected in the app. */
+    fun setLanguage(lang: Lang) {
+        language = lang
+    }
+
+    private fun report(key: String, vararg args: Any?) {
+        val message = L10n.t(language, key, *args)
+        Log.i("CongLive", message)
+        onStatus?.invoke(message)
+    }
 
     @Synchronized
     fun publish(track: VideoTrack, eglContext: EglBase.Context, mirror: Boolean) {
@@ -63,7 +78,7 @@ object CameraPreviewBridge {
         }
         renderer.init(context, object : RendererCommon.RendererEvents {
             override fun onFirstFrameRendered() {
-                Log.i("CongLive", "camera preview first frame")
+                report("bridge.firstFrame")
             }
             override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) {
                 Log.i("CongLive", "camera preview frame ${width}x${height} rotation=$rotation")

@@ -16,6 +16,7 @@
 - **Browser publishing**: React + TypeScript; `getUserMedia` / `getDisplayMedia` → WHIP, quality controls and live preview.
 - **Web viewing**: low-latency WHEP playback, live room directory, sign-up/login and real-time chat.
 - **Room features**: custom covers (upload/compress/display), chat, SRS RTC→RTMP DVR recording and an admin dashboard.
+- **Bilingual UI**: switch instantly between Chinese and English in Web, Android and the admin console; the choice is remembered.
 - **Plugin extensions**: backend plugin manager, event hooks (created/published/unpublished), admin toggles, and built-in `welcome` / `stream-audit` examples.
 - **Live2D loader**: Web and Android can load user-supplied `.model3.json` files; browser publishing can composite the model into the stream. No models are bundled.
 

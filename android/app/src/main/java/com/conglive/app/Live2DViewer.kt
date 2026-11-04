@@ -22,6 +22,7 @@ import org.json.JSONObject
  */
 class Live2DViewer(
     context: Context,
+    lang: Lang = L10n.read(context),
     private val onStatus: (String) -> Unit,
     private val onError: (String) -> Unit
 ) {
@@ -29,6 +30,11 @@ class Live2DViewer(
         private const val ASSET_URL = "file:///android_asset/live2d/viewer.html"
         private const val BRIDGE_NAME = "AndroidLive2D"
     }
+
+    /** v0.7.7: current UI language; can be changed without recreating the WebView. */
+    @Volatile private var language: Lang = lang
+
+    private fun tr(key: String, vararg args: Any?): String = L10n.t(language, key, *args)
 
     val webView: WebView = WebView(context)
     private var pageReady = false
@@ -53,6 +59,7 @@ class Live2DViewer(
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 pageReady = true
+                pushLanguageToPage()
                 pendingModelUrl?.let { pending ->
                     pendingModelUrl = null
                     loadModel(pending)
@@ -65,34 +72,45 @@ class Live2DViewer(
                 error: WebResourceError
             ) {
                 if (request.isForMainFrame) {
-                    onError("Live2D 页面加载失败：${error.description}")
+                    onError(tr("live2d.pageFailed", error.description))
                 }
             }
         }
         webView.loadUrl(ASSET_URL)
     }
 
+    /** v0.7.7: switches the WebView's own status/errors without reloading the page. */
+    fun setLanguage(newLang: Lang) {
+        language = newLang
+        pushLanguageToPage()
+    }
+
+    /** Tells the local page which dictionary to use for its status lines. */
+    private fun pushLanguageToPage() {
+        runScript("window.setLive2DLanguage(" + JSONObject.quote(language.code) + ");")
+    }
+
     /** Loads a public .model3.json URL, queuing it until the local page is ready. */
     fun loadModel(rawUrl: String) {
         val url = rawUrl.trim()
         if (url.isEmpty()) {
-            onError("请先填写 .model3.json 地址")
+            onError(tr("live2d.urlEmpty"))
             return
         }
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            onError("模型地址必须以 http:// 或 https:// 开头")
+            onError(tr("live2d.urlScheme"))
             return
         }
         if (!url.contains(".model3.json")) {
-            onError("地址需要指向 .model3.json 文件")
+            onError(tr("live2d.urlNotModel"))
             return
         }
         if (!pageReady) {
             pendingModelUrl = url
-            onStatus("Live2D 页面正在初始化，稍后自动加载…")
+            onStatus(tr("live2d.pageInitializing"))
             return
         }
-        onStatus("正在加载 Live2D 模型…")
+        onStatus(tr("live2d.loading"))
         runScript("window.loadLive2DModel(" + JSONObject.quote(url) + ");")
     }
 
@@ -101,7 +119,7 @@ class Live2DViewer(
         pageReady = false
         pendingModelUrl = null
         webView.loadUrl(ASSET_URL)
-        onStatus("正在重新加载 Live2D 页面…")
+        onStatus(tr("live2d.reloading"))
     }
 
     fun showModel() = runScript("window.showLive2D();")
@@ -132,12 +150,12 @@ class Live2DViewer(
     private inner class Bridge {
         @JavascriptInterface
         fun onStatus(message: String?) {
-            onStatus(message ?: "Live2D 状态已更新")
+            onStatus(message ?: tr("live2d.statusUpdated"))
         }
 
         @JavascriptInterface
         fun onError(message: String?) {
-            onError(message ?: "Live2D 加载失败")
+            onError(message ?: tr("live2d.loadFailed"))
         }
     }
 }

@@ -2,50 +2,160 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>葱直播 · 管理后台</title>
+<title data-i18n="app.docTitle">葱直播 · 管理后台</title>
 <style>
 :root{color-scheme:dark;--bg:#090f1e;--panel:#121b2e;--line:#263651;--muted:#91a1bd;--text:#eaf0ff;--accent:#8294ff;--bad:#ff777e;--good:#65d6a2;--warn:#f5c66b}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,"Microsoft Yahei",sans-serif}header{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;padding:15px 22px;background:#111a2c;border-bottom:1px solid var(--line)}h1{font-size:19px;margin:0}h2{font-size:18px;margin:0 0 14px}h3{margin:0 0 10px}.muted{color:var(--muted)}main{max-width:1240px;margin:22px auto;padding:0 16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:17px;margin-bottom:15px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px}.stat{font-size:30px;font-weight:750;margin-top:4px}.tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:15px}button{border:0;border-radius:8px;background:var(--accent);color:#091026;padding:9px 13px;font-weight:700;cursor:pointer}button.secondary{background:#293751;color:#e9eeff}button.danger{background:#62303b;color:#ffe5e7}button.success{background:#21533f;color:#d9fff0}button:disabled{opacity:.45;cursor:not-allowed}input{width:100%;padding:11px;border:1px solid #354563;border-radius:8px;background:#0b1323;color:white;margin:7px 0 12px}label{color:#b8c5dd}.hidden{display:none!important}.error{color:#ff9298;min-height:20px}.pill{display:inline-block;border-radius:30px;padding:3px 8px;font-size:12px;background:#25334c;color:#bdc9df}.pill.good{background:#183d32;color:#8be5ba}.pill.bad{background:#4c262e;color:#ffb2b7}.pill.warn{background:#493a1e;color:#ffdf94}.scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:720px}td,th{padding:10px 9px;text-align:left;border-bottom:1px solid #263651;vertical-align:middle}th{color:#9eacc7;font-weight:600;white-space:nowrap}td.actions{white-space:nowrap}td.actions button{margin:2px;padding:7px 9px;font-size:12px}.login{max-width:420px;margin:12vh auto}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:0 0 auto}.notice{padding:12px;border:1px solid #344561;border-radius:9px;color:#bdc9df}.video-wrap{max-width:760px}.video-wrap video{width:100%;max-height:60vh;background:#000;border-radius:10px}.video-wrap a{color:#b8c4ff}.empty{padding:22px;text-align:center;color:var(--muted)}code{color:#c0caff}@media(max-width:650px){header{padding:12px}main{padding:0 10px}.card{padding:13px}.tabs button{flex:1}}
+.login .row h2{margin:0}
+.lang-switch{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid #354563;border-radius:999px;background:#0b1323}
+.lang-switch button{background:transparent;color:#b8c5dd;padding:4px 10px;font-size:12px;font-weight:600;line-height:1.2;border-radius:999px}
+.lang-switch button:hover{color:#fff}
+.lang-switch button.active{background:var(--accent);color:#091026}
+@media(max-width:650px){.lang-switch button{padding:4px 7px;font-size:11px}}
+@media(max-width:480px){header h1{font-size:16px}}
 </style></head>
 <body>
-<header><h1>🥬 葱直播 · 管理后台</h1><div class="row"><span id="adminLabel" class="muted"></span><button class="secondary hidden" id="logout">退出登录</button></div></header>
+<header><h1 data-i18n="app.title">🥬 葱直播 · 管理后台</h1><div class="row"><span id="adminLabel" class="muted hidden" data-i18n="app.signedIn">已登录管理员</span><div class="lang-switch" role="group" aria-label="语言 / Language"><button type="button" data-lang="zh" lang="zh-CN" aria-pressed="false">中文</button><button type="button" data-lang="en" lang="en" aria-pressed="false">English</button></div><button class="secondary hidden" id="logout" data-i18n="app.logout">退出登录</button></div></header>
 <main>
-<section id="login" class="card login"><h2>管理员登录</h2><p class="muted">使用安装时生成的后台账号密码。请勿与普通用户账号混用。</p><label>管理员账号</label><input id="username" autocomplete="username" value="admin"><label>管理员密码</label><input id="password" type="password" autocomplete="current-password"><button id="loginBtn">登录</button><p id="loginError" class="error"></p></section>
+<section id="login" class="card login"><div class="row" style="justify-content:space-between"><h2 data-i18n="login.title">管理员登录</h2><div class="lang-switch" role="group" aria-label="语言 / Language"><button type="button" data-lang="zh" lang="zh-CN" aria-pressed="false">中文</button><button type="button" data-lang="en" lang="en" aria-pressed="false">English</button></div></div><p class="muted" data-i18n="login.hint">使用安装时生成的后台账号密码。请勿与普通用户账号混用。</p><label for="username" data-i18n="login.username">管理员账号</label><input id="username" autocomplete="username" value="admin"><label for="password" data-i18n="login.password">管理员密码</label><input id="password" type="password" autocomplete="current-password"><button id="loginBtn" data-i18n="login.submit">登录</button><p id="loginError" class="error"></p></section>
 <section id="dashboard" class="hidden">
-<nav class="tabs"><button data-tab="overview">仪表盘</button><button data-tab="streams" class="secondary">直播管理</button><button data-tab="users" class="secondary">用户管理</button><button data-tab="recordings" class="secondary">录像管理</button><button data-tab="plugins" class="secondary">插件管理</button><button data-tab="logs" class="secondary">操作日志</button><button data-tab="settings" class="secondary">系统信息</button></nav>
-<section id="overview" class="tab"><div class="grid"><div class="card">注册用户<div class="stat" id="userCount">—</div></div><div class="card">直播总数<div class="stat" id="streamCount">—</div></div><div class="card">正在直播<div class="stat" id="liveCount">—</div></div><div class="card">已封禁用户<div class="stat" id="bannedCount">—</div></div><div class="card">录像文件<div class="stat" id="recordCount">—</div></div><div class="card">启用插件<div class="stat" id="pluginCount">—</div></div></div><div class="card"><h3>服务健康状态</h3><p id="health" class="muted">正在检查…</p><p class="muted">后台操作会记录管理员、操作类型、目标、时间和来源 IP。</p></div></section>
-<section id="streams" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2>直播管理</h2><button class="secondary" data-refresh="streams">刷新</button></div><div class="scroll"><table><thead><tr><th>ID</th><th>标题</th><th>主播</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="streamsBody"></tbody></table></div></section>
-<section id="users" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2>用户管理</h2><button class="secondary" data-refresh="users">刷新</button></div><div class="scroll"><table><thead><tr><th>ID</th><th>用户名</th><th>注册时间</th><th>直播数</th><th>账号状态</th><th>操作</th></tr></thead><tbody id="usersBody"></tbody></table></div></section>
-<section id="recordings" class="tab hidden"><div class="card"><div class="row" style="justify-content:space-between"><div><h2>录像管理</h2><p class="muted">回放通过后端签名链接提供；删除操作会从服务器录像目录永久移除文件。</p></div><button class="secondary" data-refresh="recordings">刷新</button></div><div class="scroll"><table><thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody id="recordingsBody"></tbody></table></div></div><div class="card video-wrap" id="playerCard" style="display:none"><div class="row" style="justify-content:space-between"><h3 id="playerTitle">录像回放</h3><button class="secondary" id="closePlayer">关闭</button></div><video id="recordPlayer" controls playsinline></video><p><a id="recordOpen" target="_blank" rel="noopener">在新窗口打开录像</a></p></div></section>
-<section id="plugins" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2>插件管理</h2><button class="secondary" data-refresh="plugins">刷新</button></div><p class="muted">开关即时生效。插件代码在 API 进程内运行，不是隔离沙箱；仅启用可信来源的插件。</p><div id="pluginList"></div></section>
-<section id="logs" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2>后台操作日志</h2><button class="secondary" data-refresh="logs">刷新</button></div><div class="scroll"><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>目标</th><th>详情</th><th>来源 IP</th></tr></thead><tbody id="logsBody"></tbody></table></div></section>
-<section id="settings" class="tab hidden card"><h2>系统信息</h2><p>管理后台：<code>/admin</code></p><p>健康检查：<code>/api/health</code></p><p>WebSocket 弹幕：<code>/ws/chat</code></p><div class="notice">建议通过 HTTPS 域名访问后台；限制后台端口的公网访问范围；定期备份 MySQL 和录像目录。插件启停无需重启，代码更新仍需要重新构建 API 容器。</div></section>
+<nav class="tabs"><button data-tab="overview" data-i18n="tab.overview">仪表盘</button><button data-tab="streams" class="secondary" data-i18n="tab.streams">直播管理</button><button data-tab="users" class="secondary" data-i18n="tab.users">用户管理</button><button data-tab="recordings" class="secondary" data-i18n="tab.recordings">录像管理</button><button data-tab="plugins" class="secondary" data-i18n="tab.plugins">插件管理</button><button data-tab="logs" class="secondary" data-i18n="tab.logs">操作日志</button><button data-tab="settings" class="secondary" data-i18n="tab.settings">系统信息</button></nav>
+<section id="overview" class="tab"><div class="grid"><div class="card"><span data-i18n="overview.registeredUsers">注册用户</span><div class="stat" id="userCount">—</div></div><div class="card"><span data-i18n="overview.totalStreams">直播总数</span><div class="stat" id="streamCount">—</div></div><div class="card"><span data-i18n="overview.liveNow">正在直播</span><div class="stat" id="liveCount">—</div></div><div class="card"><span data-i18n="overview.bannedUsers">已封禁用户</span><div class="stat" id="bannedCount">—</div></div><div class="card"><span data-i18n="overview.recordingFiles">录像文件</span><div class="stat" id="recordCount">—</div></div><div class="card"><span data-i18n="overview.enabledPlugins">启用插件</span><div class="stat" id="pluginCount">—</div></div></div><div class="card"><h3 data-i18n="overview.healthTitle">服务健康状态</h3><p id="health" class="muted" data-i18n="overview.healthChecking">正在检查…</p><p class="muted" data-i18n="overview.auditHint">后台操作会记录管理员、操作类型、目标、时间和来源 IP。</p></div></section>
+<section id="streams" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2 data-i18n="streams.title">直播管理</h2><button class="secondary" data-refresh="streams" data-i18n="common.refresh">刷新</button></div><div class="scroll"><table><thead><tr><th data-i18n="common.id">ID</th><th data-i18n="streams.colTitle">标题</th><th data-i18n="streams.streamer">主播</th><th data-i18n="common.status">状态</th><th data-i18n="common.createdAt">创建时间</th><th data-i18n="common.actions">操作</th></tr></thead><tbody id="streamsBody"></tbody></table></div></section>
+<section id="users" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2 data-i18n="users.title">用户管理</h2><button class="secondary" data-refresh="users" data-i18n="common.refresh">刷新</button></div><div class="scroll"><table><thead><tr><th data-i18n="common.id">ID</th><th data-i18n="users.username">用户名</th><th data-i18n="users.registeredAt">注册时间</th><th data-i18n="users.streamCount">直播数</th><th data-i18n="users.accountStatus">账号状态</th><th data-i18n="common.actions">操作</th></tr></thead><tbody id="usersBody"></tbody></table></div></section>
+<section id="recordings" class="tab hidden"><div class="card"><div class="row" style="justify-content:space-between"><div><h2 data-i18n="recordings.title">录像管理</h2><p class="muted" data-i18n="recordings.hint">回放通过后端签名链接提供；删除操作会从服务器录像目录永久移除文件。</p></div><button class="secondary" data-refresh="recordings" data-i18n="common.refresh">刷新</button></div><div class="scroll"><table><thead><tr><th data-i18n="recordings.file">文件</th><th data-i18n="recordings.size">大小</th><th data-i18n="recordings.modified">修改时间</th><th data-i18n="common.actions">操作</th></tr></thead><tbody id="recordingsBody"></tbody></table></div></div><div class="card video-wrap" id="playerCard" style="display:none"><div class="row" style="justify-content:space-between"><h3 id="playerTitle" data-i18n="recordings.playerTitle">录像回放</h3><button class="secondary" id="closePlayer" data-i18n="common.close">关闭</button></div><video id="recordPlayer" controls playsinline></video><p><a id="recordOpen" target="_blank" rel="noopener" data-i18n="recordings.openNewWindow">在新窗口打开录像</a></p></div></section>
+<section id="plugins" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2 data-i18n="plugins.title">插件管理</h2><button class="secondary" data-refresh="plugins" data-i18n="common.refresh">刷新</button></div><p class="muted" data-i18n="plugins.hint">开关即时生效。插件代码在 API 进程内运行，不是隔离沙箱；仅启用可信来源的插件。</p><div id="pluginList"></div></section>
+<section id="logs" class="tab hidden card"><div class="row" style="justify-content:space-between"><h2 data-i18n="logs.title">后台操作日志</h2><button class="secondary" data-refresh="logs" data-i18n="common.refresh">刷新</button></div><div class="scroll"><table><thead><tr><th data-i18n="common.time">时间</th><th data-i18n="common.admin">管理员</th><th data-i18n="logs.action">操作</th><th data-i18n="logs.target">目标</th><th data-i18n="logs.details">详情</th><th data-i18n="logs.ip">来源 IP</th></tr></thead><tbody id="logsBody"></tbody></table></div></section>
+<section id="settings" class="tab hidden card"><h2 data-i18n="settings.title">系统信息</h2><p data-i18n-html="settings.adminConsole">管理后台：<code>/admin</code></p><p data-i18n-html="settings.healthCheck">健康检查：<code>/api/health</code></p><p data-i18n-html="settings.wsChat">WebSocket 弹幕：<code>/ws/chat</code></p><div class="notice" data-i18n="settings.notice">建议通过 HTTPS 域名访问后台；限制后台端口的公网访问范围；定期备份 MySQL 和录像目录。插件启停无需重启，代码更新仍需要重新构建 API 容器。</div></section>
 </section></main>
 <script>
 let token=localStorage.getItem('conglive_admin_token')||'';const $=id=>document.getElementById(id);
-async function api(path,opts={}){const r=await fetch('/api/admin'+path,{...opts,headers:{'Content-Type':'application/json','Authorization':'Bearer '+token,...opts.headers}});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'请求失败');return d}
+/* ---------- i18n（单文件内嵌字典，无构建步骤） ---------- */
+const LANG_KEY='conglive.admin.lang';
+const DICT={
+zh:{
+'app.docTitle':'葱直播 · 管理后台','app.title':'🥬 葱直播 · 管理后台','app.signedIn':'已登录管理员','app.logout':'退出登录',
+'login.title':'管理员登录','login.hint':'使用安装时生成的后台账号密码。请勿与普通用户账号混用。','login.username':'管理员账号','login.password':'管理员密码','login.submit':'登录',
+'tab.overview':'仪表盘','tab.streams':'直播管理','tab.users':'用户管理','tab.recordings':'录像管理','tab.plugins':'插件管理','tab.logs':'操作日志','tab.settings':'系统信息',
+'overview.registeredUsers':'注册用户','overview.totalStreams':'直播总数','overview.liveNow':'正在直播','overview.bannedUsers':'已封禁用户','overview.recordingFiles':'录像文件','overview.enabledPlugins':'启用插件',
+'overview.healthTitle':'服务健康状态','overview.healthChecking':'正在检查…','overview.healthOk':'API 与数据库正常','overview.healthBad':'服务异常','overview.auditHint':'后台操作会记录管理员、操作类型、目标、时间和来源 IP。',
+'common.refresh':'刷新','common.actions':'操作','common.id':'ID','common.createdAt':'创建时间','common.status':'状态','common.close':'关闭','common.time':'时间','common.admin':'管理员','common.delete':'删除',
+'streams.title':'直播管理','streams.colTitle':'标题','streams.streamer':'主播',
+'users.title':'用户管理','users.username':'用户名','users.registeredAt':'注册时间','users.streamCount':'直播数','users.accountStatus':'账号状态',
+'recordings.title':'录像管理','recordings.hint':'回放通过后端签名链接提供；删除操作会从服务器录像目录永久移除文件。','recordings.file':'文件','recordings.size':'大小','recordings.modified':'修改时间','recordings.playerTitle':'录像回放','recordings.openNewWindow':'在新窗口打开录像',
+'plugins.title':'插件管理','plugins.hint':'开关即时生效。插件代码在 API 进程内运行，不是隔离沙箱；仅启用可信来源的插件。','plugins.enable':'启用插件','plugins.disable':'停用插件',
+'logs.title':'后台操作日志','logs.action':'操作','logs.target':'目标','logs.details':'详情','logs.ip':'来源 IP',
+'settings.title':'系统信息','settings.adminConsole':'管理后台：<code>/admin</code>','settings.healthCheck':'健康检查：<code>/api/health</code>','settings.wsChat':'WebSocket 弹幕：<code>/ws/chat</code>','settings.notice':'建议通过 HTTPS 域名访问后台；限制后台端口的公网访问范围；定期备份 MySQL 和录像目录。插件启停无需重启，代码更新仍需要重新构建 API 容器。',
+'status.deleted':'已删除','status.banned':'已封禁','status.live':'直播中','status.offline':'离线','status.active':'正常',
+'action.unblock':'解封','action.block':'封禁','action.unban':'解除封禁','action.banUser':'封禁用户','action.play':'在线回放',
+'empty.streams':'暂无直播','empty.users':'暂无用户','empty.recordings':'暂时没有录像文件','empty.logs':'暂无操作日志','empty.plugins':'没有发现插件目录',
+'confirm.reasonPrompt':'封禁原因（可留空）','confirm.reasonDefault':'管理员操作',
+'confirm.blockStream':'确认封禁该直播？','confirm.unblockStream':'确认解除直播封禁？','confirm.deleteStream':'确认删除该直播记录？该操作为软删除，会阻止重新推流，但不会删除录像文件。',
+'confirm.banUser':'确认封禁用户？其现有令牌和直播会被限制。','confirm.unbanUser':'确认解除用户封禁？','confirm.deleteRecording':'确认永久删除这段录像？此操作不可恢复。',
+'confirm.enablePlugin':'启用该插件？插件代码会在 API 进程内执行。','confirm.disablePlugin':'停用该插件？',
+'err.requestFailed':'请求失败','err.loginFailed':'登录失败','err.network':'网络请求失败，请检查网络连接',
+'pluginStatus.enabled':'已启用','pluginStatus.disabled':'已停用','pluginStatus.loading':'加载中','pluginStatus.error':'加载失败','pluginStatus.invalid':'无效'
+},
+en:{
+'app.docTitle':'CongLive · Admin Console','app.title':'🥬 CongLive · Admin Console','app.signedIn':'Signed in as admin','app.logout':'Sign out',
+'login.title':'Admin sign in','login.hint':'Use the admin credentials generated during installation. Do not reuse regular user accounts.','login.username':'Admin username','login.password':'Admin password','login.submit':'Sign in',
+'tab.overview':'Dashboard','tab.streams':'Streams','tab.users':'Users','tab.recordings':'Recordings','tab.plugins':'Plugins','tab.logs':'Audit logs','tab.settings':'System info',
+'overview.registeredUsers':'Registered users','overview.totalStreams':'Total streams','overview.liveNow':'Live now','overview.bannedUsers':'Banned users','overview.recordingFiles':'Recording files','overview.enabledPlugins':'Enabled plugins',
+'overview.healthTitle':'Service health','overview.healthChecking':'Checking…','overview.healthOk':'API and database are healthy','overview.healthBad':'Service error','overview.auditHint':'Admin actions record the operator, action type, target, time, and source IP.',
+'common.refresh':'Refresh','common.actions':'Actions','common.id':'ID','common.createdAt':'Created','common.status':'Status','common.close':'Close','common.time':'Time','common.admin':'Admin','common.delete':'Delete',
+'streams.title':'Stream management','streams.colTitle':'Title','streams.streamer':'Streamer',
+'users.title':'User management','users.username':'Username','users.registeredAt':'Registered','users.streamCount':'Streams','users.accountStatus':'Account status',
+'recordings.title':'Recording management','recordings.hint':'Playback uses signed backend links; deleting permanently removes the file from the server recording directory.','recordings.file':'File','recordings.size':'Size','recordings.modified':'Modified','recordings.playerTitle':'Playback','recordings.openNewWindow':'Open recording in a new window',
+'plugins.title':'Plugin management','plugins.hint':'Toggles take effect immediately. Plugin code runs inside the API process, not an isolated sandbox; only enable plugins from trusted sources.','plugins.enable':'Enable plugin','plugins.disable':'Disable plugin',
+'logs.title':'Admin audit logs','logs.action':'Action','logs.target':'Target','logs.details':'Details','logs.ip':'Source IP',
+'settings.title':'System information','settings.adminConsole':'Admin console: <code>/admin</code>','settings.healthCheck':'Health check: <code>/api/health</code>','settings.wsChat':'WebSocket chat: <code>/ws/chat</code>','settings.notice':'Serve the admin console over an HTTPS domain; restrict public access to the admin port; back up MySQL and the recording directory regularly. Plugin toggles need no restart, but code updates still require rebuilding the API container.',
+'status.deleted':'Deleted','status.banned':'Banned','status.live':'Live','status.offline':'Offline','status.active':'Active',
+'action.unblock':'Unblock','action.block':'Block','action.unban':'Unban','action.banUser':'Ban user','action.play':'Play',
+'empty.streams':'No streams yet','empty.users':'No users yet','empty.recordings':'No recordings yet','empty.logs':'No audit logs yet','empty.plugins':'No plugin directory found',
+'confirm.reasonPrompt':'Block reason (optional)','confirm.reasonDefault':'Admin action',
+'confirm.blockStream':'Block this stream?','confirm.unblockStream':'Unblock this stream?','confirm.deleteStream':'Delete this stream record? This is a soft delete: it blocks re-streaming but keeps the recording files.',
+'confirm.banUser':'Ban this user? Their existing tokens and streams will be restricted.','confirm.unbanUser':'Unban this user?','confirm.deleteRecording':'Permanently delete this recording? This cannot be undone.',
+'confirm.enablePlugin':'Enable this plugin? Its code will run inside the API process.','confirm.disablePlugin':'Disable this plugin?',
+'err.requestFailed':'Request failed','err.loginFailed':'Sign-in failed','err.network':'Network request failed. Please check your connection.',
+'pluginStatus.enabled':'Enabled','pluginStatus.disabled':'Disabled','pluginStatus.loading':'Loading','pluginStatus.error':'Error','pluginStatus.invalid':'Invalid'
+}
+};
+/* 后端中文错误 → 英文（未知错误保留原文） */
+const ERR_EN={
+'管理员账号或密码错误':'Incorrect admin username or password',
+'请先登录管理员后台':'Please sign in to the admin console first',
+'无管理员权限':'No admin permission',
+'管理员登录已过期，请重新登录':'Admin session expired. Please sign in again.',
+'直播不存在':'Stream not found',
+'用户不存在':'User not found',
+'录像不存在':'Recording not found',
+'录像编号无效':'Invalid recording id',
+'录像路径无效':'Invalid recording path',
+'录像目录无效':'Invalid recording directory',
+'不允许访问符号链接':'Symbolic links are not allowed',
+'只能操作录像文件':'Only recording files can be managed',
+'无权播放该录像':'You are not allowed to play this recording',
+'回放链接已失效，请在后台重新打开录像':'Playback link expired. Reopen the recording from the admin console.',
+'请求内容过大':'Request body too large',
+'请求内容不是有效的 JSON':'Request body is not valid JSON',
+'服务器内部错误':'Internal server error',
+'请求失败':'Request failed'
+};
+function pickLang(){const saved=localStorage.getItem(LANG_KEY);if(saved==='zh'||saved==='en')return saved;return /^zh\b/i.test(navigator.language||'')?'zh':'en'}
+let LANG=pickLang();
+function t(key,vars){let s=DICT[LANG]&&DICT[LANG][key];if(s===undefined)s=DICT.zh[key];if(s===undefined)s=key;if(vars)for(const k of Object.keys(vars))s=s.split('{'+k+'}').join(String(vars[k]));return s}
+function errText(msg){if(!msg)return t('err.requestFailed');if(LANG==='en')return ERR_EN[msg]||msg;return msg}
+function pluginStatusLabel(status){if(!status)return '';const k='pluginStatus.'+status;return (DICT[LANG]&&DICT[LANG][k])||status}
+let playerName=null;
+function applyI18n(){
+document.documentElement.lang=LANG==='zh'?'zh-CN':'en';
+document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t(el.getAttribute('data-i18n'))});
+document.querySelectorAll('[data-i18n-html]').forEach(el=>{el.innerHTML=t(el.getAttribute('data-i18n-html'))});
+document.title=t('app.docTitle');
+document.querySelectorAll('[data-lang]').forEach(b=>{const on=b.getAttribute('data-lang')===LANG;b.classList.toggle('active',on);b.setAttribute('aria-pressed',on?'true':'false')});
+if(playerName!==null)$('playerTitle').textContent=playerName||t('recordings.playerTitle');
+}
+function setLang(next){
+if(next!=='zh'&&next!=='en')return;
+LANG=next;try{localStorage.setItem(LANG_KEY,LANG)}catch(e){}
+applyI18n();$('loginError').textContent='';
+if(!$('dashboard').classList.contains('hidden'))loadTab(currentTab);
+}
+/* ---------- API ---------- */
+async function api(path,opts={}){
+let r;
+try{r=await fetch('/api/admin'+path,{...opts,headers:{'Content-Type':'application/json','Authorization':'Bearer '+token,...opts.headers}})}
+catch(e){const err=Error(t('err.network'));err.network=true;throw err}
+const d=await r.json().catch(()=>({}));
+if(!r.ok){const err=Error(errText(d.error||t('err.requestFailed')));err.status=r.status;throw err}
+return d
+}
+function displayError(e){if(e&&e.status)return String(e.message);const raw=e&&e.message?String(e.message):String(e||'');if(!raw||/failed to fetch|networkerror|load failed|network request failed/i.test(raw))return t('err.network');return raw}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function date(s){return s?new Date(s).toLocaleString():'—'}function size(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB'}
-function tab(name){document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('hidden',x.id!==name));document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('secondary',x.dataset.tab!==name));loadTab(name)}
+function date(s){return s?new Date(s).toLocaleString(LANG==='en'?'en-US':'zh-CN'):'—'}function size(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB'}
+let currentTab='overview';
+function tab(name){currentTab=name;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('hidden',x.id!==name));document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('secondary',x.dataset.tab!==name));loadTab(name)}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));document.querySelectorAll('[data-refresh]').forEach(b=>b.onclick=()=>loadTab(b.dataset.refresh));
-function showApp(){ $('login').classList.add('hidden');$('dashboard').classList.remove('hidden');$('logout').classList.remove('hidden');$('adminLabel').textContent='已登录管理员';tab('overview')}
-$('loginBtn').onclick=async()=>{try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('password').value})});const d=await r.json();if(!r.ok)throw Error(d.error||'登录失败');token=d.token;localStorage.setItem('conglive_admin_token',token);showApp()}catch(e){$('loginError').textContent=e.message}};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-lang]');if(b)setLang(b.getAttribute('data-lang'))});
+function showApp(){$('login').classList.add('hidden');$('dashboard').classList.remove('hidden');$('logout').classList.remove('hidden');$('adminLabel').classList.remove('hidden');applyI18n();tab('overview')}
+$('loginBtn').onclick=async()=>{try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('password').value})});const d=await r.json().catch(()=>({}));if(!r.ok){const err=Error(errText(d.error||t('err.loginFailed')));err.status=r.status;throw err}token=d.token;localStorage.setItem('conglive_admin_token',token);$('loginError').textContent='';showApp()}catch(e){$('loginError').textContent=displayError(e)}};
 $('logout').onclick=()=>{token='';localStorage.removeItem('conglive_admin_token');location.reload()};
-async function loadTab(name){try{if(name==='overview'){const [s,h]=await Promise.all([api('/stats'),fetch('/api/health').then(r=>r.json())]);$('userCount').textContent=s.users;$('streamCount').textContent=s.streams;$('liveCount').textContent=s.live;$('bannedCount').textContent=s.banned;$('recordCount').textContent=s.recordings;$('pluginCount').textContent=s.plugins;$('health').textContent=h.ok?'API 与数据库正常':'服务异常'}
-if(name==='streams'){const rows=await api('/streams');$('streamsBody').innerHTML=rows.map(s=>`<tr><td>${s.id}</td><td>${esc(s.title)}</td><td>${esc(s.username)}</td><td>${s.deleted_at?'<span class="pill bad">已删除</span>':s.is_blocked?'<span class="pill bad">已封禁</span>':s.is_live?'<span class="pill good">直播中</span>':'<span class="pill">离线</span>'}</td><td>${date(s.created_at)}</td><td class="actions">${s.deleted_at?'—':`${s.is_blocked?`<button class="success" data-action="unblock-stream" data-id="${s.id}">解封</button>`:`<button class="secondary" data-action="block-stream" data-id="${s.id}">封禁</button>`}<button class="danger" data-action="delete-stream" data-id="${s.id}">删除</button>`}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">暂无直播</td></tr>'}
-if(name==='users'){const rows=await api('/users');$('usersBody').innerHTML=rows.map(u=>`<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${date(u.created_at)}</td><td>${u.stream_count}</td><td>${u.is_banned?'<span class="pill bad">已封禁</span>':'<span class="pill good">正常</span>'}</td><td class="actions">${u.is_banned?`<button class="success" data-action="unban-user" data-id="${u.id}">解除封禁</button>`:`<button class="danger" data-action="ban-user" data-id="${u.id}">封禁用户</button>`}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">暂无用户</td></tr>'}
-if(name==='recordings'){const rows=await api('/recordings');$('recordingsBody').innerHTML=rows.map(r=>`<tr><td>${esc(r.name)}<div class="muted">${esc(r.path)}</div></td><td>${size(r.size)}</td><td>${date(r.modifiedAt)}</td><td class="actions"><button data-action="play-recording" data-url="${esc(r.playUrl)}" data-name="${esc(r.name)}">在线回放</button><button class="danger" data-action="delete-recording" data-id="${r.id}">删除</button></td></tr>`).join('')||'<tr><td colspan="4" class="empty">暂时没有录像文件</td></tr>'}
-if(name==='plugins'){const d=await api('/plugins');$('pluginList').innerHTML=d.plugins.map(p=>`<div class="card"><div class="row" style="justify-content:space-between"><div><b>${esc(p.name||p.id)}</b> <span class="pill">${esc(p.version||'')}</span><p class="muted">${esc(p.description||p.id)} · ${esc(p.status)}</p></div><button class="${p.enabled?'danger':'success'}" data-action="toggle-plugin" data-id="${esc(p.id)}" data-enabled="${p.enabled?'1':'0'}">${p.enabled?'停用插件':'启用插件'}</button></div>${p.error?`<p class="error">${esc(p.error)}</p>`:''}</div>`).join('')||'<p class="empty">没有发现插件目录</p>'}
-if(name==='logs'){const rows=await api('/logs?limit=150');$('logsBody').innerHTML=rows.map(l=>`<tr><td>${date(l.createdAt)}</td><td>${esc(l.adminUsername)}</td><td>${esc(l.action)}</td><td>${esc(l.targetType||'')} #${esc(l.targetId||'')}</td><td>${esc(JSON.stringify(l.details||{}))}</td><td>${esc(l.ipAddress)}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">暂无操作日志</td></tr>'}
-}catch(e){$('health').textContent=e.message;if(e.message.includes('登录')){token='';localStorage.removeItem('conglive_admin_token');location.reload()}}}
+async function loadTab(name){try{if(name==='overview'){const [s,h]=await Promise.all([api('/stats'),fetch('/api/health').then(r=>r.json())]);$('userCount').textContent=s.users;$('streamCount').textContent=s.streams;$('liveCount').textContent=s.live;$('bannedCount').textContent=s.banned;$('recordCount').textContent=s.recordings;$('pluginCount').textContent=s.plugins;$('health').textContent=h.ok?t('overview.healthOk'):t('overview.healthBad')}
+if(name==='streams'){const rows=await api('/streams');$('streamsBody').innerHTML=rows.map(s=>`<tr><td>${s.id}</td><td>${esc(s.title)}</td><td>${esc(s.username)}</td><td>${s.deleted_at?`<span class="pill bad">${t('status.deleted')}</span>`:s.is_blocked?`<span class="pill bad">${t('status.banned')}</span>`:s.is_live?`<span class="pill good">${t('status.live')}</span>`:`<span class="pill">${t('status.offline')}</span>`}</td><td>${date(s.created_at)}</td><td class="actions">${s.deleted_at?'—':`${s.is_blocked?`<button class="success" data-action="unblock-stream" data-id="${s.id}">${t('action.unblock')}</button>`:`<button class="secondary" data-action="block-stream" data-id="${s.id}">${t('action.block')}</button>`}<button class="danger" data-action="delete-stream" data-id="${s.id}">${t('common.delete')}</button>`}</td></tr>`).join('')||`<tr><td colspan="6" class="empty">${t('empty.streams')}</td></tr>`}
+if(name==='users'){const rows=await api('/users');$('usersBody').innerHTML=rows.map(u=>`<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${date(u.created_at)}</td><td>${u.stream_count}</td><td>${u.is_banned?`<span class="pill bad">${t('status.banned')}</span>`:`<span class="pill good">${t('status.active')}</span>`}</td><td class="actions">${u.is_banned?`<button class="success" data-action="unban-user" data-id="${u.id}">${t('action.unban')}</button>`:`<button class="danger" data-action="ban-user" data-id="${u.id}">${t('action.banUser')}</button>`}</td></tr>`).join('')||`<tr><td colspan="6" class="empty">${t('empty.users')}</td></tr>`}
+if(name==='recordings'){const rows=await api('/recordings');$('recordingsBody').innerHTML=rows.map(r=>`<tr><td>${esc(r.name)}<div class="muted">${esc(r.path)}</div></td><td>${size(r.size)}</td><td>${date(r.modifiedAt)}</td><td class="actions"><button data-action="play-recording" data-url="${esc(r.playUrl)}" data-name="${esc(r.name)}">${t('action.play')}</button><button class="danger" data-action="delete-recording" data-id="${r.id}">${t('common.delete')}</button></td></tr>`).join('')||`<tr><td colspan="4" class="empty">${t('empty.recordings')}</td></tr>`}
+if(name==='plugins'){const d=await api('/plugins');$('pluginList').innerHTML=d.plugins.map(p=>`<div class="card"><div class="row" style="justify-content:space-between"><div><b>${esc(p.name||p.id)}</b> <span class="pill">${esc(p.version||'')}</span><p class="muted">${esc(p.description||p.id)} · ${esc(pluginStatusLabel(p.status))}</p></div><button class="${p.enabled?'danger':'success'}" data-action="toggle-plugin" data-id="${esc(p.id)}" data-enabled="${p.enabled?'1':'0'}">${p.enabled?t('plugins.disable'):t('plugins.enable')}</button></div>${p.error?`<p class="error">${esc(p.error)}</p>`:''}</div>`).join('')||`<p class="empty">${t('empty.plugins')}</p>`}
+if(name==='logs'){const rows=await api('/logs?limit=150');$('logsBody').innerHTML=rows.map(l=>`<tr><td>${date(l.createdAt)}</td><td>${esc(l.adminUsername)}</td><td>${esc(l.action)}</td><td>${esc(l.targetType||'')} #${esc(l.targetId||'')}</td><td>${esc(JSON.stringify(l.details||{}))}</td><td>${esc(l.ipAddress)}</td></tr>`).join('')||`<tr><td colspan="6" class="empty">${t('empty.logs')}</td></tr>`}
+}catch(e){const msg=displayError(e);$('health').textContent=msg;if(e.status===401||msg.includes('登录')||/sign in|session expired/i.test(msg)){token='';localStorage.removeItem('conglive_admin_token');location.reload()}}}
 $('dashboard').addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;const id=b.dataset.id,action=b.dataset.action;try{
-if(action==='block-stream'||action==='unblock-stream'){const reason=action==='block-stream'?(prompt('封禁原因（可留空）')||'管理员操作'):'';if(!confirm(action==='block-stream'?'确认封禁该直播？':'确认解除直播封禁？'))return;await api(`/streams/${id}/block`,{method:'PATCH',body:JSON.stringify({blocked:action==='block-stream',reason})});await loadTab('streams')}
-if(action==='delete-stream'){if(!confirm('确认删除该直播记录？该操作为软删除，会阻止重新推流，但不会删除录像文件。'))return;await api(`/streams/${id}`,{method:'DELETE'});await loadTab('streams')}
-if(action==='ban-user'||action==='unban-user'){const reason=action==='ban-user'?(prompt('封禁原因（可留空）')||'管理员操作'):'';if(!confirm(action==='ban-user'?'确认封禁用户？其现有令牌和直播会被限制。':'确认解除用户封禁？'))return;await api(`/users/${id}/ban`,{method:'PATCH',body:JSON.stringify({banned:action==='ban-user',reason})});await loadTab('users')}
-if(action==='delete-recording'){if(!confirm('确认永久删除这段录像？此操作不可恢复。'))return;await api(`/recordings/${id}`,{method:'DELETE'});await loadTab('recordings')}
-if(action==='play-recording'){const url=b.dataset.url;$('playerCard').style.display='block';$('playerTitle').textContent=b.dataset.name||'录像回放';$('recordPlayer').src=url;$('recordOpen').href=url;$('playerCard').scrollIntoView({behavior:'smooth',block:'start'});$('recordPlayer').play().catch(()=>{})}
-if(action==='toggle-plugin'){const enable=b.dataset.enabled!=='1';if(!confirm(enable?'启用该插件？插件代码会在 API 进程内执行。':'停用该插件？'))return;await api(`/plugins/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({enabled:enable})});await loadTab('plugins')}
-}catch(err){alert(err.message)}});
-$('closePlayer').onclick=()=>{$('recordPlayer').pause();$('recordPlayer').removeAttribute('src');$('recordPlayer').load();$('playerCard').style.display='none'};
+if(action==='block-stream'||action==='unblock-stream'){const reason=action==='block-stream'?(prompt(t('confirm.reasonPrompt'))||t('confirm.reasonDefault')):'';if(!confirm(action==='block-stream'?t('confirm.blockStream'):t('confirm.unblockStream')))return;await api(`/streams/${id}/block`,{method:'PATCH',body:JSON.stringify({blocked:action==='block-stream',reason})});await loadTab('streams')}
+if(action==='delete-stream'){if(!confirm(t('confirm.deleteStream')))return;await api(`/streams/${id}`,{method:'DELETE'});await loadTab('streams')}
+if(action==='ban-user'||action==='unban-user'){const reason=action==='ban-user'?(prompt(t('confirm.reasonPrompt'))||t('confirm.reasonDefault')):'';if(!confirm(action==='ban-user'?t('confirm.banUser'):t('confirm.unbanUser')))return;await api(`/users/${id}/ban`,{method:'PATCH',body:JSON.stringify({banned:action==='ban-user',reason})});await loadTab('users')}
+if(action==='delete-recording'){if(!confirm(t('confirm.deleteRecording')))return;await api(`/recordings/${id}`,{method:'DELETE'});await loadTab('recordings')}
+if(action==='play-recording'){const url=b.dataset.url;playerName=b.dataset.name||'';$('playerCard').style.display='block';$('playerTitle').textContent=playerName||t('recordings.playerTitle');$('recordPlayer').src=url;$('recordOpen').href=url;$('playerCard').scrollIntoView({behavior:'smooth',block:'start'});$('recordPlayer').play().catch(()=>{})}
+if(action==='toggle-plugin'){const enable=b.dataset.enabled!=='1';if(!confirm(enable?t('confirm.enablePlugin'):t('confirm.disablePlugin')))return;await api(`/plugins/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({enabled:enable})});await loadTab('plugins')}
+}catch(err){alert(displayError(err))}});
+$('closePlayer').onclick=()=>{$('recordPlayer').pause();$('recordPlayer').removeAttribute('src');$('recordPlayer').load();$('playerCard').style.display='none';playerName=null};
+applyI18n();
 if(token)showApp();
 </script></body></html>

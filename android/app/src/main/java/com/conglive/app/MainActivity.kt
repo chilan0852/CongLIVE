@@ -138,7 +138,12 @@ class MainActivity : AppCompatActivity() {
     private var createdPublishPath: String = ""
     private var createdStreamId: Long = 0
     private var createdCoverUrl: String = ""
-    private var draftTitle: String = "我的屏幕直播"
+    /** v0.7.7: user-visible UI language, persisted under SharedPreferences `app_language`. */
+    private var lang: Lang = Lang.fromSystem()
+    /** Last top-bar status message; re-applied when the shell is rebuilt after a language switch. */
+    private var statusMessage: String = ""
+    /** Stream title as typed by the user; empty means the localized default title is shown. */
+    private var draftTitle: String = ""
     private var chatMessages: MutableList<ChatMessage> = mutableListOf()
     private var chatSocket: WebSocket? = null
     private var player: ExoPlayer? = null
@@ -147,7 +152,8 @@ class MainActivity : AppCompatActivity() {
     private var livePlaybackStreamId: Long = 0L
     private var liveRenderer: SurfaceViewRenderer? = null
     private var bannedNotice = false
-    private var liveStatusMessage = "尚未开播"
+    /** Empty means the localized idle text from [renderBroadcast] is shown. */
+    private var liveStatusMessage = ""
     private var videoSourceMode = "screen"
     private var cameraFacingFront = true
     private var cameraStreamingActive = false
@@ -162,20 +168,23 @@ class MainActivity : AppCompatActivity() {
     private var live2DViewer: Live2DViewer? = null
     private var live2DStateView: TextView? = null
     private var live2DModelUrl = ""
-    private var live2DStatusMessage = "等待模型：贴入 .model3.json 地址后点击「加载模型」。"
+    private var live2DStatusMessage = ""
+
+    /** Convenience accessor for the zh/en dictionary used by every visible string. */
+    private fun tr(key: String, vararg args: Any?): String = L10n.t(lang, key, *args)
 
     private val capture = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             startWhipService(result.data, useCamera = false)
-        } else setStatus("已取消系统录屏授权")
+        } else setStatus(tr("status.screenPermissionCancelled"))
     }
 
     private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) beginSelectedCapture() else setStatus("未授予麦克风权限，无法开始直播。")
+        if (granted) beginSelectedCapture() else setStatus(tr("status.micDenied"))
     }
 
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startCameraStreaming() else setStatus("未授予摄像头权限，无法进行摄像头直播。")
+        if (granted) startCameraStreaming() else setStatus(tr("status.cameraDenied"))
     }
 
     /**
@@ -186,11 +195,11 @@ class MainActivity : AppCompatActivity() {
         val streamId = pendingCoverStreamId
         pendingCoverStreamId = 0L
         if (uri == null) {
-            setStatus("已取消选择封面图片")
+            setStatus(tr("status.coverCancelled"))
         } else if (streamId <= 0L) {
-            setStatus("请先创建直播间，再设置封面")
+            setStatus(tr("status.coverCreateFirst"))
         } else {
-            setStatus("正在压缩封面图片…")
+            setStatus(tr("status.coverCompressing"))
             executor.execute {
                 val prepared = try {
                     CoverSupport.prepare(contentResolver, uri)
@@ -199,7 +208,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 runOnUiThread {
                     if (prepared == null) {
-                        setStatus("封面读取失败，或图片无法压缩到 2MB 以内。请换一张图片重试。")
+                        setStatus(tr("status.coverReadFailed"))
                     } else {
                         uploadCover(streamId, prepared)
                     }
@@ -210,31 +219,32 @@ class MainActivity : AppCompatActivity() {
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val message = intent?.getStringExtra(ScreenStreamService.EXTRA_MESSAGE) ?: "直播状态已更新"
+            val message = intent?.getStringExtra(ScreenStreamService.EXTRA_MESSAGE) ?: tr("status.updated")
+            val code = intent?.getStringExtra(ScreenStreamService.EXTRA_STATUS_CODE).orEmpty()
             val wasCameraStreamingActive = cameraStreamingActive
             liveStatusMessage = message
-            if (message.contains("摄像头采集已启动")) cameraStreamingActive = true
-            if (message.contains("已切换到前置摄像头")) cameraFacingFront = true
-            if (message.contains("已切换到后置摄像头")) cameraFacingFront = false
-            if (message.contains("推流成功") || message.contains("直播中") || message.contains("正在连接 WebRTC")) broadcastActive = true
-            if (message.contains("已停止") || message.contains("服务已关闭") || message.contains("直播失败") || message.contains("开播失败") || message.contains("连接失败")) {
-                cameraStreamingActive = false
-                broadcastActive = false
+            when (code) {
+                ScreenStreamService.STATUS_CAMERA_STARTED -> cameraStreamingActive = true
+                ScreenStreamService.STATUS_CAMERA_FRONT -> cameraFacingFront = true
+                ScreenStreamService.STATUS_CAMERA_BACK -> cameraFacingFront = false
+                ScreenStreamService.STATUS_PUSH_OK,
+                ScreenStreamService.STATUS_CONNECTING -> broadcastActive = true
+                ScreenStreamService.STATUS_STOPPED,
+                ScreenStreamService.STATUS_FAILED -> {
+                    cameraStreamingActive = false
+                    broadcastActive = false
+                }
             }
             setStatus(message)
-            when {
-                message.contains("推流成功") -> {
-                    liveStatusMessage = "推流连接已建立，正在确认服务器开播状态…"
+            when (code) {
+                ScreenStreamService.STATUS_PUSH_OK -> {
+                    liveStatusMessage = tr("status.liveConfirming")
                     setStatus(liveStatusMessage)
                     refreshStreams()
                     confirmCreatedStreamLive()
                 }
-                message.contains("直播中") -> {
-                    refreshStreams()
-                }
-                message.contains("已停止") || message.contains("连接失败") ||
-                    message.contains("鉴权失败") || message.contains("启动直播失败") ||
-                    message.contains("超时") -> {
+                ScreenStreamService.STATUS_STOPPED,
+                ScreenStreamService.STATUS_FAILED -> {
                     refreshStreams()
                     loadMyStreams()
                 }
@@ -257,6 +267,12 @@ class MainActivity : AppCompatActivity() {
         currentUsername = prefs.getString("username", "") ?: ""
         videoResolution = VideoSettings.resolution(prefs.getString(VideoSettings.KEY_RESOLUTION, VideoSettings.DEFAULT_RESOLUTION_ID))
         videoFps = VideoSettings.normalizedFps(prefs.getInt(VideoSettings.KEY_FPS, VideoSettings.DEFAULT_FPS))
+        // v0.7.7: the dictionary language defaults to the system language.
+        lang = L10n.read(this)
+        CameraPreviewBridge.setLanguage(lang)
+        // Camera preview first-frame notices are localized by the bridge itself.
+        CameraPreviewBridge.onStatus = { message -> runOnUiThread { setStatus(message) } }
+        statusMessage = tr("shell.statusReady")
 
         buildShell()
         registerStatusReceiver(IntentFilter(ScreenStreamService.ACTION_STATUS))
@@ -265,6 +281,41 @@ class MainActivity : AppCompatActivity() {
             refreshStreams()
             loadMyStreams()
         }
+    }
+
+    /** The user-visible default stream title for the active source, in the current language. */
+    private fun defaultDraftTitle(): String = tr(
+        if (videoSourceMode == "camera") "broadcast.defaultCameraTitle" else "broadcast.defaultScreenTitle"
+    )
+
+    private fun draftTitleValue(): String = draftTitle.ifBlank { defaultDraftTitle() }
+
+    /** The current status line shown on the broadcast page, in the current language. */
+    private fun broadcastStatusText(): String =
+        liveStatusMessage.ifBlank { tr("broadcast.idle") }
+
+    /** The Live2D hint shown below the WebView, in the current language. */
+    private fun live2DStatusText(): String =
+        live2DStatusMessage.ifBlank { tr("live2d.waiting") }
+
+    /**
+     * Applies a new UI language, persists it and rebuilds the whole view hierarchy so
+     * every label, dialog, empty state and page is re-rendered immediately.
+     */
+    private fun switchLanguage(newLang: Lang) {
+        if (newLang == this.lang) return
+        this.lang = newLang
+        L10n.write(this, newLang)
+        CameraPreviewBridge.setLanguage(newLang)
+        live2DViewer?.setLanguage(newLang)
+        // Reset transient status lines so they are rebuilt from the new dictionary.
+        liveStatusMessage = if (broadcastActive) tr("status.liveConfirmed") else ""
+        live2DStatusMessage = ""
+        chatSocketState = if (chatSocket != null) tr("chat.connected") else tr("chat.disconnected")
+        statusMessage = tr("status.languageChanged")
+        buildShell()
+        render()
+        setStatus(statusMessage)
     }
 
     // ---------------------------------------------------------------------
@@ -288,7 +339,7 @@ class MainActivity : AppCompatActivity() {
         }
         val brand = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val brandTitle = TextView(this).apply {
-            text = "葱直播"
+            text = tr("brand.app")
             textSize = 24f
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(TEXT)
@@ -301,14 +352,14 @@ class MainActivity : AppCompatActivity() {
         }
         brand.addView(brandTitle)
         brand.addView(TextView(this).apply {
-            text = "CONGLIVE  ·  ANDROID"
+            text = tr("brand.subtitle")
             textSize = 9.5f
             setTextColor(MUTED)
             letterSpacing = 0.18f
         })
         header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
-            text = "v0.7.6"
+            text = "v0.7.7"
             textSize = 10.5f
             setTextColor(0xFFD9CEFF.toInt())
             gravity = Gravity.CENTER
@@ -328,7 +379,7 @@ class MainActivity : AppCompatActivity() {
             background = rounded(TEAL, 4)
         }, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(9) })
         statusView = TextView(this).apply {
-            text = "连接服务器后即可观看和开播"
+            text = statusMessage.ifBlank { tr("shell.statusReady") }
             textSize = 12f
             setTextColor(MUTED)
             setLineSpacing(0f, 1.15f)
@@ -355,12 +406,12 @@ class MainActivity : AppCompatActivity() {
         }
         navButtons = mutableListOf()
         listOf(
-            "🏠" to "大厅",
-            "🎥" to "开播",
-            "🎞" to "录像",
-            "👤" to "我的",
-            "✨" to "看板娘"
-        ).forEachIndexed { index, (icon, label) ->
+            "🏠" to "nav.lobby",
+            "🎥" to "nav.broadcast",
+            "🎞" to "nav.recordings",
+            "👤" to "nav.profile",
+            "✨" to "nav.live2d"
+        ).forEachIndexed { index, (icon, labelKey) ->
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -376,7 +427,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER
             })
             item.addView(TextView(this).apply {
-                text = label
+                text = tr(labelKey)
                 textSize = 10f
                 gravity = Gravity.CENTER
                 letterSpacing = 0.02f
@@ -435,26 +486,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderAuthCard() {
         val card = panel()
-        card.addView(heading("欢迎来到葱直播"))
-        card.addView(body("登录后可以发送实时弹幕、创建直播和查看自己的录像。"))
-        val userInput = input("用户名（3–40 位）")
-        val passInput = input("密码（至少 8 位）", true)
+        card.addView(heading(tr("auth.welcome")))
+        card.addView(body(tr("auth.body")))
+        val userInput = input(tr("auth.username"))
+        val passInput = input(tr("auth.password"), true)
         card.addView(userInput, fieldParams())
         card.addView(passInput, fieldParams())
         val actions = horizontal()
-        actions.addView(actionButton("登录", true) {
+        actions.addView(actionButton(tr("auth.login"), true) {
             val u = userInput.text.toString().trim()
             val p = passInput.text.toString()
             auth("login", u, p)
         }, weighted())
-        actions.addView(actionButton("注册", false) {
+        actions.addView(actionButton(tr("auth.register"), false) {
             auth("register", userInput.text.toString().trim(), passInput.text.toString())
         }, weighted())
         card.addView(actions)
-        card.addView(body("首次使用或更换 VPS 时，请先设置服务器 API 地址。真机不能使用模拟器默认地址 10.0.2.2。"))
-        val serverInput = input("服务器 API 根地址（例如 http://VPS公网IP:3000）", false).apply { setText(apiBase) }
+        card.addView(body(tr("auth.serverHint")))
+        val serverInput = input(tr("auth.serverPlaceholder"), false).apply { setText(apiBase) }
         card.addView(serverInput, fieldParams())
-        card.addView(actionButton("保存地址并检查服务器", false) {
+        card.addView(actionButton(tr("auth.saveServer"), false) {
             saveAndCheckServer(serverInput.text.toString())
         })
         content.addView(card, cardParams())
@@ -467,12 +518,12 @@ class MainActivity : AppCompatActivity() {
     private fun renderLobby() {
         val top = panel()
         val row = horizontal()
-        row.addView(heading("直播大厅"), LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(actionButton("刷新", false) { refreshStreams() })
+        row.addView(heading(tr("lobby.title")), LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(actionButton(tr("lobby.refresh"), false) { refreshStreams() })
         top.addView(row)
-        top.addView(body("选择正在直播的房间，观看画面并加入实时弹幕。"))
+        top.addView(body(tr("lobby.body")))
         if (streams.isEmpty()) {
-            top.addView(body("暂时没有直播。你可以切换到「开播」创建自己的直播。"))
+            top.addView(body(tr("lobby.empty")))
         } else {
             streams.forEach { stream ->
                 val item = LinearLayout(this).apply {
@@ -491,10 +542,10 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(TEXT)
                     setTypeface(typeface, Typeface.BOLD)
                 })
-                detail.addView(body("主播：${stream.username}"))
+                detail.addView(body(tr("lobby.host", stream.username)))
                 line.addView(detail, LinearLayout.LayoutParams(0, -2, 1f))
                 line.addView(TextView(this).apply {
-                    text = if (stream.isLive) "● 直播中" else "○ 未开播"
+                    text = if (stream.isLive) tr("lobby.live") else tr("lobby.offline")
                     textSize = 11f
                     setTextColor(if (stream.isLive) GREEN else MUTED)
                     gravity = Gravity.CENTER_VERTICAL
@@ -502,9 +553,9 @@ class MainActivity : AppCompatActivity() {
                     background = rounded(if (stream.isLive) 0x2254E0A8 else 0x11FFFFFF, 10)
                 })
                 item.addView(line)
-                item.addView(actionButton(if (selectedStream?.id == stream.id) "当前房间" else "观看 / 加入弹幕", true) {
+                item.addView(actionButton(if (selectedStream?.id == stream.id) tr("lobby.currentRoom") else tr("lobby.watch"), true) {
                     if (!stream.isLive) {
-                        setStatus("这场直播当前未开播")
+                        setStatus(tr("status.notLive"))
                     } else {
                         selectedStream = stream
                         selectedRecording = null
@@ -520,18 +571,18 @@ class MainActivity : AppCompatActivity() {
 
         selectedStream?.let { stream ->
             val playback = panel()
-            playback.addView(heading("正在观看：${stream.title}"))
-            playback.addView(body("主播：${stream.username}"))
+            playback.addView(heading(tr("lobby.watching", stream.title)))
+            playback.addView(body(tr("lobby.host", stream.username)))
             attachLiveRenderer(playback, 210, stream)
             val chatCard = panel()
-            chatCard.addView(heading("实时弹幕"))
-            chatCard.addView(body(if (token.isNullOrBlank()) "请登录后发送评论。" else "连接状态：${chatSocketState}"))
+            chatCard.addView(heading(tr("chat.title")))
+            chatCard.addView(body(if (token.isNullOrBlank()) tr("status.needLoginComments") else tr("chat.connection", chatSocketText())))
             val messagesBox = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(10), dp(8), dp(10), dp(8))
                 background = rounded(PANEL_ALT, 14, stroke = true)
             }
-            if (chatMessages.isEmpty()) messagesBox.addView(body("还没有评论，发出第一条弹幕吧。"))
+            if (chatMessages.isEmpty()) messagesBox.addView(body(tr("chat.empty")))
             chatMessages.takeLast(60).forEach { message ->
                 val line = horizontal()
                 line.addView(TextView(this).apply {
@@ -548,13 +599,13 @@ class MainActivity : AppCompatActivity() {
                 messagesBox.addView(line)
             }
             chatCard.addView(messagesBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-            val chatInput = input("输入弹幕评论，最多 500 字").apply { filters = arrayOf(InputFilter.LengthFilter(500)) }
-            val send = actionButton("发送", true) { sendChat(chatInput.text.toString()); chatInput.setText("") }
+            val chatInput = input(tr("chat.placeholder")).apply { filters = arrayOf(InputFilter.LengthFilter(500)) }
+            val send = actionButton(tr("chat.send"), true) { sendChat(chatInput.text.toString()); chatInput.setText("") }
             val chatRow = horizontal()
             chatRow.addView(chatInput, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(8) })
             chatRow.addView(send)
             chatCard.addView(chatRow)
-            chatCard.addView(actionButton("离开直播间", false) {
+            chatCard.addView(actionButton(tr("chat.leave"), false) {
                 disconnectChat()
                 selectedStream = null
                 stopPlayback()
@@ -565,7 +616,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var chatSocketState = "未连接"
+    private var chatSocketState = ""
+
+    /** Chat connection state; falls back to the localized "disconnected" label. */
+    private fun chatSocketText(): String =
+        chatSocketState.ifBlank { tr("chat.disconnected") }
 
     // ---------------------------------------------------------------------
     // Broadcast
@@ -573,22 +628,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderBroadcast() {
         val card = panel()
-        card.addView(heading("创建直播"))
-        card.addView(body("选择屏幕或摄像头作为唯一视频源，通过 WebRTC/WHIP 低延迟推流。"))
-        val statusLine = body("当前状态：$liveStatusMessage")
+        card.addView(heading(tr("broadcast.title")))
+        card.addView(body(tr("broadcast.body")))
+        val statusLine = body(tr("broadcast.currentStatus", broadcastStatusText()))
         card.addView(statusLine)
         val sourceRow = horizontal()
-        sourceRow.addView(actionButton("屏幕直播", videoSourceMode == "screen") {
-            if (broadcastActive) setStatus("请先停止当前直播，再切换视频源") else {
+        sourceRow.addView(actionButton(tr("broadcast.screen"), videoSourceMode == "screen") {
+            if (broadcastActive) setStatus(tr("broadcast.stopFirstToSwitch")) else {
                 videoSourceMode = "screen"
-                draftTitle = "我的屏幕直播"
+                draftTitle = ""
                 render()
             }
         }.apply { isEnabled = !broadcastActive }, weighted())
-        sourceRow.addView(actionButton("摄像头直播", videoSourceMode == "camera") {
-            if (broadcastActive) setStatus("请先停止当前直播，再切换视频源") else {
+        sourceRow.addView(actionButton(tr("broadcast.camera"), videoSourceMode == "camera") {
+            if (broadcastActive) setStatus(tr("broadcast.stopFirstToSwitch")) else {
                 videoSourceMode = "camera"
-                draftTitle = "我的摄像头直播"
+                draftTitle = ""
                 render()
             }
         }.apply { isEnabled = !broadcastActive }, weighted())
@@ -608,7 +663,7 @@ class MainActivity : AppCompatActivity() {
                 button.background = selectionButtonBackground(fps == videoFps)
             }
         }
-        card.addView(sectionLabel("画质设置（默认 720p / 24fps）"))
+        card.addView(sectionLabel(tr("broadcast.qualityTitle")))
         val resolutionRow = horizontal()
         VideoSettings.RESOLUTIONS.forEach { option ->
             val button = actionButton(option.label, false) {
@@ -616,7 +671,15 @@ class MainActivity : AppCompatActivity() {
                     videoResolution = option
                     persistVideoSettings()
                     paintQualitySelection()
-                    setStatus("分辨率已保存：${option.label}（${option.width}×${option.height}，${bitrateLabel(option.bitrateBps)}），下次开播生效")
+                    setStatus(
+                        tr(
+                            "broadcast.resolutionSaved",
+                            option.label,
+                            option.width,
+                            option.height,
+                            bitrateLabel(option.bitrateBps)
+                        )
+                    )
                 }
             }
             resolutionButtons[option.id] = button
@@ -630,7 +693,7 @@ class MainActivity : AppCompatActivity() {
                     videoFps = fps
                     persistVideoSettings()
                     paintQualitySelection()
-                    setStatus("帧率已保存：$fps fps，下次开播生效")
+                    setStatus(tr("broadcast.fpsSaved", fps))
                 }
             }
             fpsButtons[fps] = button
@@ -641,7 +704,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(qualitySummary)
 
         if (videoSourceMode == "camera") {
-            card.addView(body("摄像头默认关闭。开始直播时才请求摄像头权限；可在直播中切换前置/后置摄像头。"))
+            card.addView(body(tr("broadcast.cameraBody")))
             if (cameraStreamingActive) {
                 val preview = SurfaceViewRenderer(this).apply {
                     layoutParams = LinearLayout.LayoutParams(-1, dp(220)).apply { topMargin = dp(8); bottomMargin = dp(8) }
@@ -652,54 +715,71 @@ class MainActivity : AppCompatActivity() {
                 cameraPreviewRenderer = preview
                 // SurfaceViewRenderer 必须先 init（创建 EGL surface）再加入窗口，
                 // 否则部分机型不会再回调 surfaceCreated，预览会一直黑屏。
-                if (!CameraPreviewBridge.attach(preview)) setStatus("摄像头预览暂不可用，但推流状态会继续显示")
+                if (!CameraPreviewBridge.attach(preview)) setStatus(tr("broadcast.previewUnavailable"))
                 card.addView(preview)
-                card.addView(actionButton("切换前置 / 后置摄像头", false) {
-                    val switchIntent = Intent(this, ScreenStreamService::class.java).setAction(ScreenStreamService.ACTION_SWITCH_CAMERA)
-                    startService(switchIntent)
+                card.addView(actionButton(tr("broadcast.switchCamera"), false) {
+                    startService(
+                        Intent(this, ScreenStreamService::class.java)
+                            .setAction(ScreenStreamService.ACTION_SWITCH_CAMERA)
+                            .putExtra(ScreenStreamService.EXTRA_LANGUAGE, lang.code)
+                    )
                 })
             }
         } else {
-            card.addView(body("开始时会弹出 Android 系统屏幕共享授权。"))
+            card.addView(body(tr("broadcast.screenPermissionBody")))
         }
-        val titleInput = input("直播标题").apply { setText(draftTitle) }
+        val titleInput = input(tr("broadcast.titleHint")).apply { setText(draftTitleValue()) }
         titleInput.addTextChangedListener(SimpleTextWatcher { draftTitle = it })
         card.addView(titleInput, fieldParams())
-        card.addView(actionButton("创建直播并获取推流地址", true) { createLive() })
+        card.addView(actionButton(tr("broadcast.create"), true) { createLive() })
         if (createdPublishPath.isNotBlank()) {
-            card.addView(infoRow("传输协议", "WebRTC / WHIP"))
-            card.addView(infoRow("视频源", if (videoSourceMode == "camera") "摄像头" else "屏幕"))
-            card.addView(infoRow("画质", "${videoResolution.label} · ${bitrateLabel(videoResolution.bitrateBps)} · $videoFps fps"))
-            card.addView(infoRow("发布接口", createdPublishPath))
+            card.addView(infoRow(tr("broadcast.protocol"), "WebRTC / WHIP"))
+            card.addView(
+                infoRow(
+                    tr("broadcast.source"),
+                    if (videoSourceMode == "camera") tr("broadcast.sourceCamera") else tr("broadcast.sourceScreen")
+                )
+            )
+            card.addView(infoRow(tr("broadcast.qualityLabel"), "${videoResolution.label} · ${bitrateLabel(videoResolution.bitrateBps)} · $videoFps fps"))
+            card.addView(infoRow(tr("broadcast.publishPath"), createdPublishPath))
             if (createdStreamId > 0L) {
-                card.addView(sectionLabel("直播封面（可选）"))
+                card.addView(sectionLabel(tr("broadcast.coverTitle")))
                 card.addView(
-                    coverFrame(draftTitle, createdCoverUrl, large = true),
+                    coverFrame(draftTitleValue(), createdCoverUrl, large = true),
                     LinearLayout.LayoutParams(-1, dp(164)).apply { topMargin = dp(8) }
                 )
-                card.addView(actionButton(if (coverUploading) "正在上传封面…" else "从相册选择封面", false) {
+                card.addView(actionButton(if (coverUploading) tr("broadcast.coverUploading") else tr("broadcast.chooseCover"), false) {
                     pickCover(createdStreamId)
                 }.apply { isEnabled = !coverUploading })
             }
-            card.addView(actionButton(if (videoSourceMode == "camera") "开始摄像头直播" else "开始屏幕直播", true) { startCapture() })
+            card.addView(
+                actionButton(
+                    if (videoSourceMode == "camera") tr("broadcast.startCamera") else tr("broadcast.startScreen"),
+                    true
+                ) { startCapture() }
+            )
         } else {
-            card.addView(body("创建直播后会显示开播按钮和封面设置。"))
+            card.addView(body(tr("broadcast.createdHint")))
         }
-        card.addView(actionButton("停止直播", false) {
-            liveStatusMessage = "正在停止直播…"
-            startService(Intent(this, ScreenStreamService::class.java).setAction(ScreenStreamService.ACTION_STOP))
+        card.addView(actionButton(tr("broadcast.stop"), false) {
+            liveStatusMessage = tr("broadcast.stopping")
+            startService(
+                Intent(this, ScreenStreamService::class.java)
+                    .setAction(ScreenStreamService.ACTION_STOP)
+                    .putExtra(ScreenStreamService.EXTRA_LANGUAGE, lang.code)
+            )
             setStatus(liveStatusMessage)
             render()
         })
         content.addView(card, cardParams())
 
         val own = panel()
-        own.addView(heading("我的直播记录"))
-        if (myStreams.length() == 0) own.addView(body("还没有创建过直播。"))
+        own.addView(heading(tr("broadcast.myStreams")))
+        if (myStreams.length() == 0) own.addView(body(tr("broadcast.myStreamsEmpty")))
         for (i in 0 until myStreams.length()) {
             val item = myStreams.optJSONObject(i) ?: continue
             val streamId = item.optLong("id")
-            val title = item.optString("title", "未命名直播")
+            val title = item.optString("title", tr("broadcast.untitled"))
             val isLive = item.optBooleanCompat("is_live")
             val coverUrl = myStreamCoverUrl(streamId, item)
             val row = horizontal()
@@ -715,8 +795,11 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(TEXT)
                 setTypeface(typeface, Typeface.BOLD)
             })
-            detail.addView(body("${if (isLive) "● 直播中" else "○ 未开播"}  ·  ${if (coverUrl.isNotBlank()) "已有封面" else "暂无封面"}"))
-            detail.addView(chipButton(if (coverUploading) "正在上传…" else "从相册选封面", false) {
+            detail.addView(body(
+                "${if (isLive) tr("lobby.live") else tr("lobby.offline")}  ·  " +
+                    (if (coverUrl.isNotBlank()) tr("broadcast.hasCover") else tr("broadcast.noCover"))
+            ))
+            detail.addView(chipButton(if (coverUploading) tr("broadcast.uploadingShort") else tr("broadcast.chooseCoverShort"), false) {
                 pickCover(streamId)
             }.apply { isEnabled = !coverUploading })
             row.addView(detail, LinearLayout.LayoutParams(0, -2, 1f))
@@ -728,14 +811,14 @@ class MainActivity : AppCompatActivity() {
     private fun renderRecordings() {
         val card = panel()
         val row = horizontal()
-        row.addView(heading("我的录像"), LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(actionButton("刷新", false) { loadRecordings() })
+        row.addView(heading(tr("recordings.title")), LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(actionButton(tr("recordings.refresh"), false) { loadRecordings() })
         card.addView(row)
-        card.addView(body("这里只显示你自己直播产生的录像。点击即可在线回放。"))
+        card.addView(body(tr("recordings.body")))
         if (token.isNullOrBlank()) {
-            card.addView(body("请先登录后查看个人录像。"))
+            card.addView(body(tr("recordings.needLogin")))
         } else if (recordings.isEmpty()) {
-            card.addView(body("暂时没有找到录像。直播结束并完成录像写入后，可点击刷新。"))
+            card.addView(body(tr("recordings.empty")))
         } else {
             recordings.forEach { recording ->
                 val item = LinearLayout(this).apply {
@@ -750,7 +833,7 @@ class MainActivity : AppCompatActivity() {
                     setTypeface(typeface, Typeface.BOLD)
                 })
                 item.addView(body("${formatBytes(recording.size)}  ·  ${recording.modifiedAt.replace('T', ' ').take(16)}"))
-                item.addView(actionButton(if (selectedRecording?.id == recording.id) "正在播放" else "在线回放", true) {
+                item.addView(actionButton(if (selectedRecording?.id == recording.id) tr("recordings.playing") else tr("recordings.play"), true) {
                     selectedRecording = recording
                     selectedStream = null
                     stopLivePlayback()
@@ -765,7 +848,7 @@ class MainActivity : AppCompatActivity() {
         content.addView(card, cardParams())
         selectedRecording?.let { recording ->
             val playCard = panel()
-            playCard.addView(heading("录像回放：${recording.name}"))
+            playCard.addView(heading(tr("recordings.playTitle", recording.name)))
             attachPlayer(playCard, 220)
             content.addView(playCard, cardParams())
         }
@@ -773,9 +856,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderProfile() {
         val card = panel()
-        card.addView(heading("我的账户"))
+        card.addView(heading(tr("profile.title")))
         if (token.isNullOrBlank()) {
-            card.addView(body("登录后可管理自己的直播和录像。"))
+            card.addView(body(tr("profile.bodyGuest")))
         } else {
             card.addView(TextView(this).apply {
                 text = "👤  $currentUsername"
@@ -784,26 +867,41 @@ class MainActivity : AppCompatActivity() {
                 setTypeface(typeface, Typeface.BOLD)
                 setPadding(0, dp(2), 0, dp(4))
             })
-            card.addView(body(if (bannedNotice) "账号当前不可用，请联系管理员。" else "账号状态：正常登录"))
-            card.addView(actionButton("检查账号状态 / 刷新我的直播", true) { loadMyStreams() })
-            card.addView(actionButton("退出登录", false) {
+            card.addView(body(if (bannedNotice) tr("profile.banned") else tr("profile.statusOk")))
+            card.addView(actionButton(tr("profile.checkStatus"), true) { loadMyStreams() })
+            card.addView(actionButton(tr("profile.logout"), false) {
                 disconnectChat()
                 token = null
                 currentUsername = ""
                 bannedNotice = false
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").remove("username").apply()
-                setStatus("已退出登录。正在进行的系统录屏服务不会被自动停止。")
+                setStatus(tr("status.loggedOut"))
                 render()
             })
         }
         content.addView(card, cardParams())
 
+        // v0.7.7: 中文 / English switch. Rebuilds the whole UI immediately and persists
+        // the choice in SharedPreferences `app_language`.
+        val language = panel()
+        language.addView(heading(tr("profile.language")))
+        language.addView(body(tr("profile.languageBody")))
+        val languageRow = horizontal()
+        val zhButton = actionButton(tr("lang.zh"), false) { switchLanguage(Lang.ZH) }
+        zhButton.background = selectionButtonBackground(lang == Lang.ZH)
+        val enButton = actionButton(tr("lang.en"), false) { switchLanguage(Lang.EN) }
+        enButton.background = selectionButtonBackground(lang == Lang.EN)
+        languageRow.addView(zhButton, weighted())
+        languageRow.addView(enButton, weighted())
+        language.addView(languageRow)
+        content.addView(language, cardParams())
+
         val settings = panel()
-        settings.addView(heading("服务器设置"))
-        settings.addView(body("填写你的葱直播 API 根地址，例如 https://live.example.com 或 http://服务器IP:3000。"))
-        apiAddressInput = input("API 地址", false).apply { setText(apiBase) }
+        settings.addView(heading(tr("profile.settings")))
+        settings.addView(body(tr("profile.serverBody")))
+        apiAddressInput = input(tr("profile.apiHint"), false).apply { setText(apiBase) }
         settings.addView(apiAddressInput, fieldParams())
-        settings.addView(actionButton("保存服务器地址并检查连接", true) {
+        settings.addView(actionButton(tr("profile.saveServer"), true) {
             saveAndCheckServer(apiAddressInput.text.toString())
         })
         content.addView(settings, cardParams())
@@ -815,12 +913,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderLive2D() {
         val card = panel()
-        card.addView(heading("Live2D 看板娘"))
-        card.addView(body("只作为 App 界面里的看板娘显示，不会合成进直播画面，也不会进入 WebRTC 推流。"))
-        card.addView(body("输入模型 .model3.json 的公网地址；模型资源需要允许跨域访问（CORS）。运行库来自 CDN，App 不内置模型。"))
+        card.addView(heading(tr("live2d.title")))
+        card.addView(body(tr("live2d.body")))
+        card.addView(body(tr("live2d.body2")))
 
         val viewer = live2DViewer ?: Live2DViewer(
             this,
+            lang,
             onStatus = { message ->
                 runOnUiThread {
                     live2DStatusMessage = message
@@ -846,22 +945,22 @@ class MainActivity : AppCompatActivity() {
         webBox.addView(viewer.webView, FrameLayout.LayoutParams(-1, -1))
         card.addView(webBox, LinearLayout.LayoutParams(-1, dp(340)).apply { topMargin = dp(10) })
 
-        val urlInput = input("模型地址，例如 https://example.com/model.model3.json", false)
+        val urlInput = input(tr("live2d.urlHint"), false)
         if (live2DModelUrl.isNotBlank()) urlInput.setText(live2DModelUrl)
         card.addView(urlInput, fieldParams())
         val actions = horizontal()
-        actions.addView(actionButton("加载模型", true) {
+        actions.addView(actionButton(tr("live2d.load"), true) {
             val url = urlInput.text.toString().trim()
             live2DModelUrl = url
             viewer.loadModel(url)
         }, weighted())
-        actions.addView(actionButton("显示", false) { viewer.showModel() }, weighted())
-        actions.addView(actionButton("隐藏", false) { viewer.hideModel() }, weighted())
+        actions.addView(actionButton(tr("live2d.show"), false) { viewer.showModel() }, weighted())
+        actions.addView(actionButton(tr("live2d.hide"), false) { viewer.hideModel() }, weighted())
         card.addView(actions)
-        val state = body(live2DStatusMessage)
+        val state = body(live2DStatusText())
         live2DStateView = state
         card.addView(state)
-        card.addView(actionButton("重新加载看板娘页面", false) { viewer.reload() })
+        card.addView(actionButton(tr("live2d.reload"), false) { viewer.reload() })
         content.addView(card, cardParams())
     }
 
@@ -871,25 +970,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun pickCover(streamId: Long) {
         if (token.isNullOrBlank()) {
-            setStatus("请先登录后再设置封面")
+            setStatus(tr("status.coverLogin"))
             return
         }
         if (streamId <= 0L) {
-            setStatus("请先创建直播间，再设置封面")
+            setStatus(tr("status.coverCreateFirst"))
             return
         }
         if (coverUploading) {
-            setStatus("上一张封面还在上传，请稍候")
+            setStatus(tr("status.coverUploadingPrevious"))
             return
         }
         pendingCoverStreamId = streamId
-        setStatus("请选择一张图片作为直播封面")
+        setStatus(tr("status.coverChoose"))
         coverPicker.launch(arrayOf("image/*"))
     }
 
     private fun uploadCover(streamId: Long, prepared: CoverSupport.PreparedCover) {
         coverUploading = true
-        setStatus("正在上传封面（${prepared.sizeLabel}）…")
+        setStatus(tr("status.coverUploading", prepared.sizeLabel))
         render()
         apiRequest(
             "POST",
@@ -908,13 +1007,13 @@ class MainActivity : AppCompatActivity() {
                         .apply()
                 }
                 if (streamId == createdStreamId) createdCoverUrl = coverUrl
-                setStatus("封面已更新")
+                setStatus(tr("status.coverUpdated"))
                 loadMyStreams()
                 refreshStreams()
                 render()
             } else {
-                if (result.code == 413) setStatus("封面图片超过 2MB 限制，请换一张更小的图片")
-                else handleApiError(result, "封面上传失败")
+                if (result.code == 413) setStatus(tr("status.coverTooLarge"))
+                else handleApiError(result, tr("status.coverUploadFailed"))
             }
         }
     }
@@ -939,41 +1038,41 @@ class MainActivity : AppCompatActivity() {
     private fun saveAndCheckServer(rawValue: String) {
         val value = rawValue.trim().trimEnd('/')
         if (!value.startsWith("http://") && !value.startsWith("https://")) {
-            setStatus("服务器地址必须以 http:// 或 https:// 开头")
+            setStatus(tr("status.serverInvalid"))
             return
         }
         if (value.endsWith("/api", ignoreCase = true)) {
-            setStatus("地址不要带 /api 后缀，例如填写 http://服务器IP:3000")
+            setStatus(tr("status.serverNoApiSuffix"))
             return
         }
         apiBase = value
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("api", apiBase).apply()
-        setStatus("正在检查服务器：$apiBase")
+        setStatus(tr("status.serverChecking", apiBase))
         apiRequest("GET", "/api/health", null, false) { result ->
             if (result.code == 200 && result.obj?.optBoolean("ok") == true) {
                 val dbStatus = result.obj.optString("database", "unknown")
-                setStatus("服务器连接成功，API 正常，数据库：$dbStatus。现在可以注册或登录。")
+                setStatus(tr("status.serverOk", dbStatus))
                 refreshStreams()
             } else {
                 val reason = result.obj?.optString("error")?.takeIf { it.isNotBlank() }
                     ?: result.raw.take(180).ifBlank { "HTTP ${result.code}" }
-                setStatus("服务器地址已保存，但健康检查失败：$reason。请检查公网端口、防火墙和服务状态。")
+                setStatus(tr("status.serverFailed", L10n.serverError(lang, reason)))
             }
         }
     }
 
     private fun auth(path: String, username: String, password: String) {
         if (username.isBlank() || password.isBlank()) {
-            setStatus("请填写用户名和密码")
+            setStatus(tr("status.authFields"))
             return
         }
         val usernameLength = username.codePointCount(0, username.length)
         if (usernameLength !in 3..40 || !username.matches(Regex("[\\p{L}\\p{N}_]+"))) {
-            setStatus("用户名需为3-40位中文、字母、数字或下划线")
+            setStatus(tr("status.authUsername"))
             return
         }
         if (password.length !in 8..128) {
-            setStatus("密码长度需为8-128个字符")
+            setStatus(tr("status.authPassword"))
             return
         }
         apiRequest("POST", "/api/auth/$path", JSONObject().put("username", username).put("password", password), false) { result ->
@@ -984,48 +1083,48 @@ class MainActivity : AppCompatActivity() {
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                         .putString("token", token).putString("username", currentUsername).apply()
                     bannedNotice = false
-                    setStatus("登录成功，欢迎回来 $currentUsername")
+                    setStatus(tr("status.loginOk", currentUsername))
                     refreshStreams()
                     loadMyStreams()
                     loadRecordings()
                 } else {
-                    setStatus("注册成功，请使用新账号登录")
+                    setStatus(tr("status.registerOk"))
                 }
                 render()
-            } else handleApiError(result, "认证失败")
+            } else handleApiError(result, tr("status.authFailed"))
         }
     }
 
     private fun createLive() {
         if (token.isNullOrBlank()) {
-            setStatus("请先登录")
+            setStatus(tr("status.needLogin"))
             currentTab = 3
             render()
             return
         }
-        apiRequest("POST", "/api/streams", JSONObject().put("title", draftTitle), true) { result ->
+        apiRequest("POST", "/api/streams", JSONObject().put("title", draftTitleValue()), true) { result ->
             if (result.code in 200..299) {
                 createdPublishPath = result.obj?.optString("publishPath").orEmpty()
                 createdStreamId = result.obj?.optLong("id") ?: 0L
                 createdCoverUrl = ""
-                liveStatusMessage = "直播间已创建，等待开始屏幕共享"
-                setStatus("WebRTC 直播间创建成功。请授权屏幕共享后开播。")
+                liveStatusMessage = tr("broadcast.roomCreated")
+                setStatus(tr("status.created"))
                 loadMyStreams()
                 render()
-            } else handleApiError(result, "创建直播失败")
+            } else handleApiError(result, tr("status.createFailed"))
         }
     }
 
     private fun startCapture() {
         if (token.isNullOrBlank()) {
-            setStatus("请先登录后创建直播")
+            setStatus(tr("status.needLoginCreate"))
             return
         }
         if (!createdPublishPath.startsWith("/api/streams/") || token.isNullOrBlank()) {
-            setStatus("请先登录并创建有效的 WebRTC 直播间")
+            setStatus(tr("status.needLoginValidStream"))
             return
         }
-        liveStatusMessage = if (videoSourceMode == "camera") "等待摄像头权限…" else "等待系统录屏授权…"
+        liveStatusMessage = if (videoSourceMode == "camera") tr("status.waitCameraPermission") else tr("status.waitScreenPermission")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
         } else beginSelectedCapture()
@@ -1041,7 +1140,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startCameraStreaming() {
         if (createdPublishPath.isBlank() || token.isNullOrBlank()) {
-            setStatus("请先登录并创建直播间")
+            setStatus(tr("status.needLoginStream"))
             return
         }
         val service = Intent(this, ScreenStreamService::class.java).apply {
@@ -1050,12 +1149,13 @@ class MainActivity : AppCompatActivity() {
             putExtra(ScreenStreamService.EXTRA_FRONT_CAMERA, cameraFacingFront)
             putExtra(ScreenStreamService.EXTRA_SIGNAL_URL, apiBase.trimEnd('/') + createdPublishPath)
             putExtra(ScreenStreamService.EXTRA_AUTH_TOKEN, token.orEmpty())
+            putExtra(ScreenStreamService.EXTRA_LANGUAGE, lang.code)
             putVideoExtras(this)
         }
         ContextCompat.startForegroundService(this, service)
         cameraStreamingActive = true
         broadcastActive = true
-        liveStatusMessage = "正在打开摄像头并连接 WebRTC…"
+        liveStatusMessage = tr("status.openingCamera")
         setStatus(liveStatusMessage)
         if (currentTab == 1) render()
     }
@@ -1068,12 +1168,13 @@ class MainActivity : AppCompatActivity() {
             putExtra(ScreenStreamService.EXTRA_DATA, projectionData)
             putExtra(ScreenStreamService.EXTRA_SIGNAL_URL, apiBase.trimEnd('/') + createdPublishPath)
             putExtra(ScreenStreamService.EXTRA_AUTH_TOKEN, token.orEmpty())
+            putExtra(ScreenStreamService.EXTRA_LANGUAGE, lang.code)
             putVideoExtras(this)
         }
         ContextCompat.startForegroundService(this, service)
         cameraStreamingActive = false
         broadcastActive = true
-        liveStatusMessage = "正在申请屏幕共享并连接推流服务器…"
+        liveStatusMessage = tr("status.requestingCapture")
         setStatus(liveStatusMessage)
         if (currentTab == 1) render()
     }
@@ -1100,8 +1201,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun videoQualitySummary(): String {
         val resolution = videoResolution
-        return "当前：${resolution.label} · ${resolution.width}×${resolution.height} · ${bitrateLabel(resolution.bitrateBps)} · $videoFps fps\n" +
-            "屏幕直播按竖屏 ${resolution.height}×${resolution.width} 采集；摄像头直播按横屏 ${resolution.width}×${resolution.height} 采集。"
+        return tr(
+            "broadcast.qualitySummary",
+            resolution.label,
+            resolution.width,
+            resolution.height,
+            bitrateLabel(resolution.bitrateBps),
+            videoFps,
+            resolution.height,
+            resolution.width,
+            resolution.width,
+            resolution.height
+        )
     }
 
     private fun bitrateLabel(bps: Int): String =
@@ -1122,8 +1233,8 @@ class MainActivity : AppCompatActivity() {
                     val whepPath = item.optString("whepPath", "")
                     if (live && whepPath.isNotBlank()) next.add(LiveStream(
                         id = item.optLong("id"),
-                        title = item.optString("title", "未命名直播"),
-                        username = item.optString("username", "用户"),
+                        title = item.optString("title", tr("broadcast.untitled")),
+                        username = item.optString("username", tr("chat.user")),
                         isLive = true,
                         whepPath = whepPath,
                         coverUrl = resolveApiUrl(item.optString("coverUrl").ifBlank { item.optString("cover_url") })
@@ -1134,7 +1245,7 @@ class MainActivity : AppCompatActivity() {
                 streams = next.filter { it.isLive }
                 if (currentTab == 0) render()
             } else if (result.code != 0) {
-                handleApiError(result, "读取直播列表失败", false)
+                handleApiError(result, tr("status.streamsReadFailed"), false)
             }
         }
     }
@@ -1148,7 +1259,7 @@ class MainActivity : AppCompatActivity() {
                     for (i in 0 until myStreams.length()) {
                         val item = myStreams.optJSONObject(i) ?: continue
                         if (item.optLong("id") == createdStreamId) {
-                            if (item.optBooleanCompat("is_live")) liveStatusMessage = "直播中 · 服务器已确认推流成功"
+                            if (item.optBooleanCompat("is_live")) liveStatusMessage = tr("status.liveConfirmed")
                             val serverCover = myStreamCoverUrl(createdStreamId, item)
                             if (serverCover.isNotBlank()) createdCoverUrl = serverCover
                             break
@@ -1156,7 +1267,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 if (currentTab == 1) render()
-            } else handleApiError(result, "读取个人直播失败")
+            } else handleApiError(result, tr("status.myStreamsReadFailed"))
         }
     }
 
@@ -1182,24 +1293,24 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 if (isLive) {
-                    liveStatusMessage = "直播中 · 服务器已确认推流成功"
+                    liveStatusMessage = tr("status.liveConfirmed")
                     setStatus(liveStatusMessage)
                     refreshStreams()
                 } else if (found && attempt < 12) {
-                    liveStatusMessage = "推流连接已建立，等待服务器确认（${attempt + 1}/12）…"
+                    liveStatusMessage = tr("status.liveWaiting", attempt + 1)
                     setStatus(liveStatusMessage)
                     mainHandler.postDelayed({ confirmCreatedStreamLive(attempt + 1) }, 1500L)
                 } else if (found) {
-                    liveStatusMessage = "推流已连接，但服务器尚未确认开播。请检查 SRS HTTP 回调和服务器日志。"
+                    liveStatusMessage = tr("status.liveNotConfirmed")
                     setStatus(liveStatusMessage)
                 } else {
-                    liveStatusMessage = "找不到当前直播记录，请刷新或重新创建直播。"
+                    liveStatusMessage = tr("status.liveMissing")
                     setStatus(liveStatusMessage)
                 }
                 if (currentTab == 1) render()
             } else {
                 if (attempt < 12) mainHandler.postDelayed({ confirmCreatedStreamLive(attempt + 1) }, 1500L)
-                else setStatus("读取服务器直播状态失败（HTTP ${result.code}）")
+                else setStatus(tr("status.liveReadFailed", result.code))
             }
         }
     }
@@ -1227,7 +1338,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 recordings = list
                 if (currentTab == 2) render()
-            } else handleApiError(result, "读取录像失败")
+            } else handleApiError(result, tr("status.recordingsReadFailed"))
         }
     }
 
@@ -1238,12 +1349,12 @@ class MainActivity : AppCompatActivity() {
     private fun connectChat(streamId: Long) {
         val savedToken = token
         if (savedToken.isNullOrBlank()) {
-            setStatus("登录后才能加入弹幕")
+            setStatus(tr("status.needLoginChat"))
             return
         }
         disconnectChat()
         chatMessages.clear()
-        chatSocketState = "正在连接…"
+        chatSocketState = tr("chat.connecting")
         val wsBase = apiBase.replaceFirst("^https://".toRegex(), "wss://")
             .replaceFirst("^http://".toRegex(), "ws://")
         val request = Request.Builder().url("${wsBase.trimEnd('/')}/ws/chat").build()
@@ -1262,8 +1373,8 @@ class MainActivity : AppCompatActivity() {
                             for (i in 0 until history.length()) messages.add(history.optJSONObject(i)?.toChatMessage() ?: continue)
                             runOnUiThread {
                                 chatMessages = messages
-                                chatSocketState = "已连接"
-                                setStatus("弹幕已连接：${selectedStream?.title ?: "直播间"}")
+                                chatSocketState = tr("chat.connected")
+                                setStatus(tr("status.chatConnected", selectedStream?.title ?: tr("chat.room")))
                                 render()
                             }
                         }
@@ -1276,7 +1387,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                         "warning", "error" -> runOnUiThread {
-                            chatSocketState = data.optString("message", "弹幕暂不可用")
+                            chatSocketState = L10n.serverError(lang, data.optString("message", tr("chat.unavailable")))
                             setStatus(chatSocketState)
                             if (currentTab == 0) render()
                         }
@@ -1286,14 +1397,14 @@ class MainActivity : AppCompatActivity() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 runOnUiThread {
-                    chatSocketState = if (code == 4403) reason.ifBlank { "直播间或账号不可用" } else "连接已关闭"
+                    chatSocketState = if (code == 4403) L10n.serverError(lang, reason.ifBlank { tr("chat.roomUnavailable") }) else tr("chat.closed")
                     setStatus(chatSocketState)
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 runOnUiThread {
-                    chatSocketState = "弹幕连接失败：${t.message ?: "网络错误"}"
+                    chatSocketState = tr("chat.connectFailed", t.message ?: tr("chat.networkError"))
                     setStatus(chatSocketState)
                 }
             }
@@ -1304,7 +1415,7 @@ class MainActivity : AppCompatActivity() {
     private fun disconnectChat() {
         chatSocket?.close(1000, "user left room")
         chatSocket = null
-        chatSocketState = "未连接"
+        chatSocketState = tr("chat.disconnected")
         chatMessages.clear()
     }
 
@@ -1312,15 +1423,15 @@ class MainActivity : AppCompatActivity() {
         val text = content.trim()
         if (text.isBlank()) return
         if (text.length > 500) {
-            setStatus("弹幕最多 500 个字符")
+            setStatus(tr("status.chatMaxLength"))
             return
         }
         val socket = chatSocket
         if (socket == null || !socket.send(JSONObject().put("type", "chat").put("content", text).toString())) {
-            setStatus("弹幕尚未连接，请重新加入直播间")
+            setStatus(tr("status.chatNotConnected"))
             return
         }
-        setStatus("弹幕已发送")
+        setStatus(tr("status.chatSent"))
     }
 
     private fun attachLiveRenderer(parent: LinearLayout, heightDp: Int, stream: LiveStream) {
@@ -1333,7 +1444,7 @@ class MainActivity : AppCompatActivity() {
         val currentToken = token
         if (currentToken.isNullOrBlank() || stream.whepPath.isBlank()) {
             parent.addView(view)
-            setStatus("需要登录并获取有效的 WHEP 播放路径")
+            setStatus(tr("status.needWhepPath"))
             return
         }
         if (livePlaybackClient == null || livePlaybackStreamId != stream.id) {
@@ -1343,7 +1454,8 @@ class MainActivity : AppCompatActivity() {
             val client = WebRtcPlaybackClient(
                 this,
                 apiBase.trimEnd('/') + stream.whepPath,
-                currentToken
+                currentToken,
+                lang
             ) { message -> runOnUiThread { setStatus(message) } }
             livePlaybackClient = client
             // init 必须在 addView 之前，确保 Surface 创建后 EGL 渲染链已就绪。
@@ -1369,7 +1481,7 @@ class MainActivity : AppCompatActivity() {
     /** Media3 is retained only for MP4 recordings. Live streams use WHEP/WebRTC. */
     private fun playMedia(url: String) {
         if (url.isBlank()) {
-            setStatus("录像播放地址为空")
+            setStatus(tr("status.recordingUrlEmpty"))
             return
         }
         try {
@@ -1380,9 +1492,9 @@ class MainActivity : AppCompatActivity() {
             exo.prepare()
             exo.playWhenReady = true
             playerView?.player = exo
-            setStatus("正在加载录像…")
+            setStatus(tr("status.recordingLoading"))
         } catch (e: Exception) {
-            setStatus("录像播放器启动失败：${e.message}")
+            setStatus(tr("status.recordingPlayerFailed", e.message ?: ""))
         }
     }
 
@@ -1423,7 +1535,7 @@ class MainActivity : AppCompatActivity() {
         val base = apiBase.trimEnd('/')
         val bearer = if (authenticated) token else null
         executor.execute {
-            var result = ApiResult(0, obj = JSONObject().put("error", "网络请求失败"))
+            var result = ApiResult(0, obj = JSONObject().put("error", tr("status.networkFailed")))
             var connection: HttpURLConnection? = null
             try {
                 connection = URL(base + path).openConnection() as HttpURLConnection
@@ -1450,7 +1562,7 @@ class MainActivity : AppCompatActivity() {
                 } catch (_: Exception) { }
                 result = ApiResult(code, obj, array, responseText)
             } catch (e: Exception) {
-                result = ApiResult(0, obj = JSONObject().put("error", "连接失败：${e.message ?: "请检查服务器地址"}"))
+                result = ApiResult(0, obj = JSONObject().put("error", tr("status.connectionFailed", e.message ?: tr("status.checkServerAddress"))))
             } finally {
                 connection?.disconnect()
             }
@@ -1464,16 +1576,19 @@ class MainActivity : AppCompatActivity() {
             currentUsername = ""
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").remove("username").apply()
         }
-        val error = result.obj?.optString("error")?.takeIf { it.isNotBlank() }
+        // Keep the raw server text for the ban check, but show the English mapping when
+        // the UI language is English (the backend itself stays Chinese in v0.7.7).
+        val rawError = result.obj?.optString("error")?.takeIf { it.isNotBlank() }
             ?: result.obj?.optString("message")?.takeIf { it.isNotBlank() }
-            ?: "$fallback（HTTP ${result.code}）"
-        if (result.code == 403 && error.contains("封禁")) {
+            ?: tr("status.httpError", fallback, result.code)
+        val error = L10n.serverError(lang, rawError)
+        if (result.code == 403 && rawError.contains(L10n.BANNED_MARKER)) {
             bannedNotice = true
             token = null
             currentUsername = ""
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").remove("username").apply()
             disconnectChat()
-            setStatus("账号已被管理员封禁，登录状态已清除。")
+            setStatus(tr("status.banned"))
             render()
         } else {
             setStatus(error)
@@ -1483,12 +1598,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun JSONObject.toChatMessage(): ChatMessage = ChatMessage(
         id = optString("id", System.nanoTime().toString()),
-        username = optString("username", "用户"),
+        username = optString("username", tr("chat.user")),
         content = optString("content", ""),
         createdAt = optString("createdAt", "")
     )
 
     private fun setStatus(message: String) {
+        statusMessage = message
         if (::statusView.isInitialized) statusView.text = message
     }
 
@@ -1587,7 +1703,7 @@ class MainActivity : AppCompatActivity() {
             outlineProvider = roundedOutline(16)
         }
         frame.addView(TextView(this).apply {
-            text = title.trim().take(1).ifBlank { "葱" }
+            text = title.trim().take(1).ifBlank { tr("cover.initialFallback") }
             textSize = if (large) 44f else 22f
             setTextColor(0x59FFFFFF)
             typeface = Typeface.DEFAULT_BOLD
@@ -1722,6 +1838,7 @@ class MainActivity : AppCompatActivity() {
             CameraPreviewBridge.detach(preview)
         }
         cameraPreviewRenderer = null
+        CameraPreviewBridge.onStatus = null
         live2DViewer?.destroy()
         live2DViewer = null
         httpClient.dispatcher.executorService.shutdown()

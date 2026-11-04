@@ -66,6 +66,19 @@ class ScreenStreamService : Service() {
         const val EXTRA_VIDEO_BITRATE = "video_bitrate"
         const val EXTRA_VIDEO_FPS = "video_fps"
         const val EXTRA_MESSAGE = "message"
+        /** Machine-readable status kind; the Activity must not parse localized text. */
+        const val EXTRA_STATUS_CODE = "status_code"
+        /** v0.7.7: UI language; the service falls back to SharedPreferences `app_language`. */
+        const val EXTRA_LANGUAGE = "language"
+        const val STATUS_INFO = "info"
+        const val STATUS_WARNING = "warning"
+        const val STATUS_CONNECTING = "connecting"
+        const val STATUS_PUSH_OK = "push_ok"
+        const val STATUS_STOPPED = "stopped"
+        const val STATUS_FAILED = "failed"
+        const val STATUS_CAMERA_STARTED = "camera_started"
+        const val STATUS_CAMERA_FRONT = "camera_front"
+        const val STATUS_CAMERA_BACK = "camera_back"
         private const val MIN_VIDEO_DIMENSION = 160
         private const val MAX_VIDEO_DIMENSION = 1920
         private const val MIN_VIDEO_BITRATE = 100_000
@@ -105,6 +118,8 @@ class ScreenStreamService : Service() {
     @Volatile private var stopRequested = false
     @Volatile private var mediaWorker: Thread? = null
     @Volatile private var pendingCall: Call? = null
+    /** v0.7.7: language code from the most recent start Intent (see [currentLanguage]). */
+    @Volatile private var requestedLanguageCode: String? = null
     /** Serializes worker hand-off and teardown so a joining stop cannot miss a worker. */
     private val stateLock = Any()
 
@@ -119,17 +134,35 @@ class ScreenStreamService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // v0.7.7: the Activity passes its current language; the persisted choice wins
+        // once the user has picked one (SharedPreferences `app_language`).
+        intent?.getStringExtra(EXTRA_LANGUAGE)?.takeIf { it.isNotBlank() }?.let {
+            requestedLanguageCode = it
+        }
         when (intent?.action) {
             ACTION_START -> startStreaming(intent)
-            ACTION_STOP -> stopStreaming("直播已停止")
+            ACTION_STOP -> stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
             ACTION_SWITCH_CAMERA -> switchCamera()
         }
         return START_NOT_STICKY
     }
 
+    /** Reads the language selected in the app (SharedPreferences `app_language`).
+     *  An Intent extra is honoured only while the user has never saved an explicit
+     *  choice, so switching the language mid-stream is picked up immediately. */
+    private fun currentLanguage(): Lang {
+        val explicit = requestedLanguageCode
+        if (explicit != null && L10n.storedCode(applicationContext) == null) return Lang.fromCode(explicit)
+        return L10n.read(applicationContext)
+    }
+
+    private fun tr(key: String, vararg args: Any?): String = L10n.t(currentLanguage(), key, *args)
+
     private fun startStreaming(intent: Intent) {
+        // Keep the notification channel name in sync with a language switch.
+        createNotificationChannel()
         if (isStarting || isStopping || peer != null || mediaWorker?.isAlive == true) {
-            sendStatus("WebRTC 直播已经在启动或进行中")
+            sendStatus(tr("svc.alreadyRunning"), STATUS_WARNING)
             return
         }
         cameraMode = intent.getBooleanExtra(EXTRA_CAMERA_MODE, false)
@@ -149,27 +182,27 @@ class ScreenStreamService : Service() {
         try {
             startCaptureForeground(cameraMode)
         } catch (error: Exception) {
-            sendStatus("无法启用前台服务：${error.message ?: error.javaClass.simpleName}")
-            stopStreaming("直播已停止")
+            sendStatus(tr("svc.foregroundFailed", error.message ?: error.javaClass.simpleName), STATUS_FAILED)
+            stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
             return
         }
         val signalUrl = intent.getStringExtra(EXTRA_SIGNAL_URL).orEmpty().trim()
         val authToken = intent.getStringExtra(EXTRA_AUTH_TOKEN).orEmpty().trim()
         if (!signalUrl.startsWith("https://") && !signalUrl.startsWith("http://")) {
-            sendStatus("WHIP 信令地址无效")
-            stopStreaming("直播已停止")
+            sendStatus(tr("svc.invalidSignal"), STATUS_FAILED)
+            stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
             return
         }
         if (authToken.isBlank()) {
-            sendStatus("登录状态已失效，请重新登录")
-            stopStreaming("直播已停止")
+            sendStatus(tr("svc.loginExpired"), STATUS_FAILED)
+            stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
             return
         }
         @Suppress("DEPRECATION")
         val resultData = intent.getParcelableExtra<Intent>(EXTRA_DATA)
         if (!cameraMode && resultData == null) {
-            sendStatus("没有收到系统录屏授权数据")
-            stopStreaming("直播已停止")
+            sendStatus(tr("svc.noProjection"), STATUS_FAILED)
+            stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
             return
         }
         val worker = Thread({
@@ -191,9 +224,9 @@ class ScreenStreamService : Service() {
                 }
             } catch (error: Exception) {
                 if (!stopRequested) {
-                    sendStatus("WebRTC 开播失败：${error.message ?: error.javaClass.simpleName}")
+                    sendStatus(tr("svc.startFailed", error.message ?: error.javaClass.simpleName), STATUS_FAILED)
                 }
-                stopStreaming("直播已停止")
+                stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
             } finally {
                 isStarting = false
             }
@@ -201,7 +234,7 @@ class ScreenStreamService : Service() {
         synchronized(stateLock) {
             if (stopRequested) {
                 isStarting = false
-                stopStreaming("直播已停止")
+                stopStreaming(tr("svc.stopped"), STATUS_STOPPED)
                 return
             }
             mediaWorker = worker
@@ -258,25 +291,25 @@ class ScreenStreamService : Service() {
             val names = enumerator.deviceNames.toList()
             val selectedName = names.firstOrNull { enumerator.isFrontFacing(it) == frontCamera }
                 ?: names.firstOrNull()
-                ?: throw IllegalStateException("没有发现可用摄像头")
+                ?: throw IllegalStateException(tr("svc.noCamera"))
             val created = enumerator.createCapturer(selectedName, object : CameraEventsHandler {
                 override fun onCameraError(errorDescription: String) {
-                    sendStatus("摄像头错误：$errorDescription")
+                    sendStatus(tr("svc.cameraError", errorDescription), STATUS_WARNING)
                 }
-                override fun onCameraDisconnected() { sendStatus("摄像头已断开") }
-                override fun onCameraFreezed(errorDescription: String) { sendStatus("摄像头画面冻结：$errorDescription") }
-                override fun onCameraOpening(cameraName: String) { sendStatus("正在打开摄像头：$cameraName") }
-                override fun onFirstFrameAvailable() { sendStatus("摄像头采集已启动，正在连接 WebRTC…") }
-                override fun onCameraClosed() { sendStatus("摄像头已关闭") }
-            }) ?: throw IllegalStateException("无法创建摄像头采集器")
+                override fun onCameraDisconnected() { sendStatus(tr("svc.cameraDisconnected"), STATUS_WARNING) }
+                override fun onCameraFreezed(errorDescription: String) { sendStatus(tr("svc.cameraFrozen", errorDescription), STATUS_WARNING) }
+                override fun onCameraOpening(cameraName: String) { sendStatus(tr("svc.cameraOpening", cameraName), STATUS_WARNING) }
+                override fun onFirstFrameAvailable() { sendStatus(tr("svc.cameraStarted"), STATUS_CAMERA_STARTED) }
+                override fun onCameraClosed() { sendStatus(tr("svc.cameraClosed"), STATUS_WARNING) }
+            }) ?: throw IllegalStateException(tr("svc.capturerCreateFailed"))
             cameraCapturer = created
             capturer = created
             created.initialize(helper, applicationContext, source.capturerObserver)
         } else {
-            val projectionData = resultData ?: throw IllegalStateException("没有收到系统录屏授权数据")
+            val projectionData = resultData ?: throw IllegalStateException(tr("svc.noProjection"))
             val screen = ScreenCapturerAndroid(projectionData, object : MediaProjection.Callback() {
                 override fun onStop() {
-                    if (!isStopping) stopStreaming("系统已停止屏幕共享")
+                    if (!isStopping) stopStreaming(tr("svc.projectionStopped"), STATUS_STOPPED)
                 }
             })
             capturer = screen
@@ -312,13 +345,13 @@ class ScreenStreamService : Service() {
         fps: Int,
         iFrameInterval: Int = VideoSettings.DEFAULT_IFRAME_INTERVAL
     ) {
-        val source = videoSource ?: throw IllegalStateException("视频源尚未初始化")
+        val source = videoSource ?: throw IllegalStateException(tr("svc.videoSourceMissing"))
         videoBitrateBps = bitrateBps
         videoFps = fps
         this.iFrameInterval = iFrameInterval
         // 采集尺寸由 startCapture() 指定；这里让编码端按设置的分辨率/帧率输出。
         source.adaptOutputFormat(width, height, fps)
-        sendStatus("视频参数：${width}×${height} @ ${fps}fps · ${bitrateBps / 1000}kbps · 关键帧间隔 ${iFrameInterval}s")
+        sendStatus(tr("svc.videoParams", width, height, fps, bitrateBps / 1000, iFrameInterval), STATUS_INFO)
     }
 
     /** Applies the configured bitrate / frame rate to the video RTP sender.
@@ -333,10 +366,10 @@ class ScreenStreamService : Service() {
                 encoding.maxFramerate = videoFps
             }
             if (!sender.setParameters(parameters)) {
-                sendStatus("视频码率/帧率参数未被编码器接受，将使用默认值")
+                sendStatus(tr("svc.encodingRejected"), STATUS_WARNING)
             }
         } catch (error: Exception) {
-            sendStatus("应用视频码率参数失败：${error.message ?: error.javaClass.simpleName}")
+            sendStatus(tr("svc.encodingFailed", error.message ?: error.javaClass.simpleName), STATUS_WARNING)
         }
     }
 
@@ -360,9 +393,9 @@ class ScreenStreamService : Service() {
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
                 if (stopRequested || isStopping) return
                 when (state) {
-                    PeerConnection.IceConnectionState.CONNECTED, PeerConnection.IceConnectionState.COMPLETED -> sendStatus("WebRTC 推流成功 · 服务器媒体通道已连接")
-                    PeerConnection.IceConnectionState.FAILED -> sendStatus("WebRTC ICE 连接失败，请检查公网候选 IP 和 UDP/TCP 8000")
-                    PeerConnection.IceConnectionState.DISCONNECTED -> sendStatus("WebRTC 网络暂时断开，正在尝试恢复…")
+                    PeerConnection.IceConnectionState.CONNECTED, PeerConnection.IceConnectionState.COMPLETED -> sendStatus(tr("svc.iceConnected"), STATUS_PUSH_OK)
+                    PeerConnection.IceConnectionState.FAILED -> sendStatus(tr("svc.iceFailed"), STATUS_FAILED)
+                    PeerConnection.IceConnectionState.DISCONNECTED -> sendStatus(tr("svc.iceDisconnected"), STATUS_WARNING)
                     else -> Unit
                 }
             }
@@ -377,10 +410,10 @@ class ScreenStreamService : Service() {
             override fun onDataChannel(channel: org.webrtc.DataChannel) = Unit
             override fun onRenegotiationNeeded() = Unit
             override fun onAddTrack(receiver: RtpReceiver, streams: Array<out org.webrtc.MediaStream>) = Unit
-        }) ?: throw IllegalStateException("无法创建 WebRTC PeerConnection")
+        }) ?: throw IllegalStateException(tr("svc.peerCreateFailed"))
         peer = connection
         abortIfStopped()
-        val screenTrack = videoTrack ?: throw IllegalStateException("屏幕视频轨道尚未初始化")
+        val screenTrack = videoTrack ?: throw IllegalStateException(tr("svc.trackMissing"))
         connection.addTrack(screenTrack, listOf("conglive-live"))
         audioTrack?.let { connection.addTrack(it, listOf("conglive-live")) }
         abortIfStopped()
@@ -389,18 +422,18 @@ class ScreenStreamService : Service() {
         // codec family (and RTX retransmission) on the sending transceiver.
         val videoTransceiver = connection.transceivers.firstOrNull {
             it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
-        } ?: throw IllegalStateException("找不到视频 RTP Transceiver")
+        } ?: throw IllegalStateException(tr("svc.transceiverMissing"))
         val videoCapabilities = factory!!.getRtpSenderCapabilities(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO)
         val h264Codecs = videoCapabilities.codecs.filter {
             it.mimeType.equals("video/H264", ignoreCase = true) || it.mimeType.equals("video/rtx", ignoreCase = true)
         }
         if (h264Codecs.none { it.mimeType.equals("video/H264", ignoreCase = true) }) {
-            throw IllegalStateException("当前设备 WebRTC 编码器没有 H.264，请更新系统 WebView/设备 WebRTC 运行环境")
+            throw IllegalStateException(tr("svc.h264Missing"))
         }
         // webrtc-sdk 150.x returns RtcError (isSuccess/isError/error) instead of RtcErrorType.
         val codecError = videoTransceiver.setCodecPreferences(h264Codecs)
         if (codecError.isError()) {
-            throw IllegalStateException("设置 H.264 编码优先级失败：${codecError.error()?.message ?: "未知错误"}")
+            throw IllegalStateException(tr("svc.codecFailed", codecError.error()?.message ?: tr("svc.unknownError")))
         }
         applyVideoEncodingParameters(videoTransceiver.sender)
         abortIfStopped()
@@ -414,8 +447,8 @@ class ScreenStreamService : Service() {
             override fun onCreateFailure(error: String) { createError = error; offerLatch.countDown() }
             override fun onSetFailure(error: String) = Unit
         }, MediaConstraints())
-        awaitLatch(offerLatch, 20_000, "创建 WebRTC SDP Offer 超时")
-        val localOffer = offer ?: throw IllegalStateException("创建 SDP Offer 失败：${createError ?: "未知错误"}")
+        awaitLatch(offerLatch, 20_000, tr("svc.offerTimeout"))
+        val localOffer = offer ?: throw IllegalStateException(tr("svc.offerFailed", createError ?: tr("svc.unknownError")))
 
         val localSet = CountDownLatch(1)
         var localError: String? = null
@@ -426,16 +459,16 @@ class ScreenStreamService : Service() {
             override fun onCreateFailure(error: String) = Unit
             override fun onSetFailure(error: String) { localError = error; localSet.countDown() }
         }, localOffer)
-        awaitLatch(localSet, 15_000, "设置本地 SDP 超时")
-        if (localError != null) throw IllegalStateException("设置本地 SDP 失败：$localError")
+        awaitLatch(localSet, 15_000, tr("svc.localSdpTimeout"))
+        if (localError != null) throw IllegalStateException(tr("svc.localSdpFailed", localError))
         if (!awaitOrTimeout(iceComplete, 18_000)) {
             abortIfStopped()
-            sendStatus("ICE 候选收集超时，继续尝试当前候选")
+            sendStatus(tr("svc.iceTimeout"), STATUS_WARNING)
         }
 
         abortIfStopped()
-        val localSdp = connection.localDescription?.description ?: throw IllegalStateException("本地 SDP 为空")
-        sendStatus("正在通过 WHIP 协商媒体会话…")
+        val localSdp = connection.localDescription?.description ?: throw IllegalStateException(tr("svc.localSdpEmpty"))
+        sendStatus(tr("svc.negotiating"), STATUS_CONNECTING)
         val request = Request.Builder()
             .url(signalUrl)
             .header("Authorization", "Bearer $authToken")
@@ -448,8 +481,8 @@ class ScreenStreamService : Service() {
             call.execute().use { response ->
                 val answer = response.body?.string().orEmpty()
                 abortIfStopped()
-                if (!response.isSuccessful) throw IllegalStateException("WHIP HTTP ${response.code}：${answer.take(240)}")
-                if (!answer.startsWith("v=0")) throw IllegalStateException("媒体服务器返回的 SDP Answer 无效")
+                if (!response.isSuccessful) throw IllegalStateException(tr("svc.whipHttp", response.code, answer.take(240)))
+                if (!answer.startsWith("v=0")) throw IllegalStateException(tr("svc.answerInvalid"))
                 abortIfStopped()
                 val remoteSet = CountDownLatch(1)
                 var remoteError: String? = null
@@ -459,17 +492,19 @@ class ScreenStreamService : Service() {
                     override fun onCreateFailure(error: String) = Unit
                     override fun onSetFailure(error: String) { remoteError = error; remoteSet.countDown() }
                 }, SessionDescription(SessionDescription.Type.ANSWER, answer))
-                awaitLatch(remoteSet, 15_000, "设置远端 SDP 超时")
-                if (remoteError != null) throw IllegalStateException("设置远端 SDP 失败：$remoteError")
+                awaitLatch(remoteSet, 15_000, tr("svc.remoteSdpTimeout"))
+                if (remoteError != null) throw IllegalStateException(tr("svc.remoteSdpFailed", remoteError))
             }
         } finally {
             pendingCall = null
         }
-        sendStatus("WHIP 信令交换完成，正在建立媒体连接…")
+        sendStatus(tr("svc.whipDone"), STATUS_CONNECTING)
     }
 
     private fun startCaptureForeground(useCamera: Boolean) {
-        val notification = buildNotification(if (useCamera) "正在启动 WebRTC 摄像头直播" else "正在启动 WebRTC 屏幕直播")
+        val notification = buildNotification(
+            if (useCamera) tr("broadcast.startingCameraNotification") else tr("broadcast.startingScreenNotification")
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             var types = if (useCamera) ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
                 else ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
@@ -486,21 +521,24 @@ class ScreenStreamService : Service() {
     private fun switchCamera() {
         val camera = cameraCapturer
         if (camera == null || isStopping || stopRequested) {
-            sendStatus("当前不是摄像头直播")
+            sendStatus(tr("svc.notCamera"), STATUS_WARNING)
             return
         }
         camera.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFrontCamera: Boolean) {
                 CameraPreviewBridge.setMirror(isFrontCamera)
-                sendStatus(if (isFrontCamera) "已切换到前置摄像头" else "已切换到后置摄像头")
+                sendStatus(
+                    if (isFrontCamera) tr("svc.switchCameraFront") else tr("svc.switchCameraBack"),
+                    if (isFrontCamera) STATUS_CAMERA_FRONT else STATUS_CAMERA_BACK
+                )
             }
             override fun onCameraSwitchError(errorDescription: String) {
-                sendStatus("切换摄像头失败：$errorDescription")
+                sendStatus(tr("svc.switchCameraFailed", errorDescription), STATUS_WARNING)
             }
         })
     }
 
-    private fun stopStreaming(message: String) {
+    private fun stopStreaming(message: String, code: String = STATUS_STOPPED) {
         var worker: Thread? = null
         synchronized(stateLock) {
             if (isStopping) return
@@ -530,7 +568,7 @@ class ScreenStreamService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (_: Exception) {
         }
-        sendStatus(message)
+        sendStatus(message, code)
         isStarting = false
         // isStopping intentionally stays true until the next startStreaming() call so
         // late callbacks (MediaProjection, camera events, worker) cannot tear down twice.
@@ -631,29 +669,35 @@ class ScreenStreamService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "葱直播屏幕推流", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, tr("svc.channelName"), NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
     private fun buildNotification(message: String): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setContentTitle("葱直播")
+        .setContentTitle(tr("brand.app"))
         .setContentText(message)
         .setSmallIcon(android.R.drawable.presence_video_online)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
         .build()
 
-    private fun sendStatus(message: String) {
+    private fun sendStatus(message: String, code: String = STATUS_INFO) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(message))
         }
-        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).putExtra(EXTRA_MESSAGE, message))
+        sendBroadcast(
+            Intent(ACTION_STATUS)
+                .setPackage(packageName)
+                .putExtra(EXTRA_MESSAGE, message)
+                .putExtra(EXTRA_STATUS_CODE, code)
+                .putExtra(EXTRA_LANGUAGE, currentLanguage().code)
+        )
     }
 
     override fun onDestroy() {
         if (!isStopping && (peer != null || isStarting || mediaWorker != null)) {
-            stopStreaming("直播服务已关闭")
+            stopStreaming(tr("svc.serviceClosed"), STATUS_STOPPED)
         }
         http.dispatcher.executorService.shutdown()
         super.onDestroy()

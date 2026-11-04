@@ -39,8 +39,12 @@ class WebRtcPlaybackClient(
     context: Context,
     private val whepUrl: String,
     private val authToken: String,
+    private val lang: Lang = L10n.read(context),
     private val onStatus: (String) -> Unit,
 ) {
+    /** Localized user-visible playback status (v0.7.7). */
+    private fun tr(key: String, vararg args: Any?): String = L10n.t(lang, key, *args)
+
     private val appContext = context.applicationContext
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -86,7 +90,7 @@ class WebRtcPlaybackClient(
             newRenderer.init(eglBase.eglBaseContext, object : RendererCommon.RendererEvents {
             override fun onFirstFrameRendered() {
                 Log.i("CongLive", "whep first frame rendered")
-                if (!closed) onStatus("已收到视频首帧")
+                if (!closed) onStatus(tr("playback.firstFrame"))
             }
             override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) {
                 Log.i("CongLive", "whep frame ${width}x${height} rotation=$rotation")
@@ -130,7 +134,7 @@ class WebRtcPlaybackClient(
             val connection = synchronized(lock) {
                 abortIfClosed()
                 factory.createPeerConnection(config, createObserver(iceGatheringComplete))
-            } ?: throw IllegalStateException("无法创建 WebRTC 播放连接")
+            } ?: throw IllegalStateException(tr("playback.peerCreateFailed"))
             synchronized(lock) {
                 if (closed) {
                     connection.close()
@@ -167,8 +171,8 @@ class WebRtcPlaybackClient(
 
                 override fun onSetFailure(message: String) = Unit
             }, MediaConstraints())
-            awaitLatch(createLatch, 20_000, "创建 WHEP Offer 超时")
-            val localOffer = offer ?: throw IllegalStateException("创建 WHEP Offer 失败：${createError ?: "未知错误"}")
+            awaitLatch(createLatch, 20_000, tr("playback.offerTimeout"))
+            val localOffer = offer ?: throw IllegalStateException(tr("playback.offerFailed", createError ?: tr("svc.unknownError")))
 
             var localError: String? = null
             val localLatch = CountDownLatch(1)
@@ -185,18 +189,18 @@ class WebRtcPlaybackClient(
                     localLatch.countDown()
                 }
             }, localOffer)
-            awaitLatch(localLatch, 15_000, "设置本地 SDP 超时")
-            if (localError != null) throw IllegalStateException("本地 SDP 失败：$localError")
+            awaitLatch(localLatch, 15_000, tr("playback.localSdpTimeout"))
+            if (localError != null) throw IllegalStateException(tr("playback.localSdpFailed", localError))
             if (!awaitOrTimeout(iceGatheringComplete, 15_000)) {
                 abortIfClosed()
-                onStatus("ICE 候选收集超时，继续尝试当前候选")
+                onStatus(tr("playback.iceTimeout"))
             }
 
             abortIfClosed()
             val localSdp = synchronized(lock) {
                 abortIfClosed()
                 connection.localDescription?.description
-            } ?: throw IllegalStateException("本地 SDP 为空")
+            } ?: throw IllegalStateException(tr("playback.localSdpEmpty"))
             val request = Request.Builder().url(whepUrl)
                 .header("Authorization", "Bearer $authToken")
                 .header("Accept", "application/sdp")
@@ -218,13 +222,13 @@ class WebRtcPlaybackClient(
                     remoteLatch.countDown()
                 }
             }, SessionDescription(SessionDescription.Type.ANSWER, answer))
-            awaitLatch(remoteLatch, 15_000, "设置远端 SDP 超时")
-            if (remoteError != null) throw IllegalStateException("远端 SDP 失败：$remoteError")
-            if (!closed) onStatus("WHEP 信令已完成，正在连接媒体…")
+            awaitLatch(remoteLatch, 15_000, tr("playback.remoteSdpTimeout"))
+            if (remoteError != null) throw IllegalStateException(tr("playback.remoteSdpFailed", remoteError))
+            if (!closed) onStatus(tr("playback.signalingDone"))
         } catch (_: SessionAborted) {
             // close() was requested while negotiating; close() owns the cleanup.
         } catch (exception: Exception) {
-            if (!closed) onStatus("WebRTC 播放失败：${exception.message ?: exception.javaClass.simpleName}")
+            if (!closed) onStatus(tr("playback.failed", exception.message ?: exception.javaClass.simpleName))
         } finally {
             sessionThread = null
         }
@@ -238,11 +242,11 @@ class WebRtcPlaybackClient(
             onStatus(
                 when (state) {
                     PeerConnection.IceConnectionState.CONNECTED,
-                    PeerConnection.IceConnectionState.COMPLETED -> "WebRTC 已连接 · 低延迟播放中"
+                    PeerConnection.IceConnectionState.COMPLETED -> tr("playback.connected")
 
-                    PeerConnection.IceConnectionState.FAILED -> "WebRTC ICE 失败，请检查候选 IP 和 8000 端口"
-                    PeerConnection.IceConnectionState.DISCONNECTED -> "WebRTC 播放暂时断开"
-                    else -> "WebRTC：${state.name}"
+                    PeerConnection.IceConnectionState.FAILED -> tr("playback.iceFailed")
+                    PeerConnection.IceConnectionState.DISCONNECTED -> tr("playback.disconnected")
+                    else -> tr("playback.state", state.name)
                 }
             )
         }
@@ -324,8 +328,8 @@ class WebRtcPlaybackClient(
             call.execute().use { response ->
                 val answer = response.body?.string().orEmpty()
                 abortIfClosed()
-                if (!response.isSuccessful) throw IllegalStateException("WHEP HTTP ${response.code}：${answer.take(240)}")
-                if (!answer.startsWith("v=0")) throw IllegalStateException("服务器 SDP Answer 无效")
+                if (!response.isSuccessful) throw IllegalStateException(tr("playback.whepHttp", response.code, answer.take(240)))
+                if (!answer.startsWith("v=0")) throw IllegalStateException(tr("playback.answerInvalid"))
                 return answer
             }
         } finally {

@@ -2,6 +2,19 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 import {
+  LocalizedError,
+  backendText,
+  errorMessage,
+  msg,
+  rawText,
+  setLang,
+  t,
+  translateMessage,
+  useLang,
+  type I18nKey,
+  type TextMessage,
+} from './i18n';
+import {
   MAX_COVER_BYTES,
   describeCoverSize,
   prepareCover,
@@ -31,7 +44,7 @@ type LiveStream = {
   coverUrl?: string | null;
 };
 type RtcTone = 'idle' | 'info' | 'ok' | 'warn' | 'error';
-type RtcStatus = { text: string; tone: RtcTone };
+type RtcStatus = { text: TextMessage; tone: RtcTone };
 type LastCreatedStream = { id: number; title: string; coverUrl: string | null };
 type VideoElementWithFrames = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: () => void) => number;
@@ -54,7 +67,7 @@ function coverFallbackStyle(stream: LiveStream): React.CSSProperties {
 /** First visible character of the title, used inside the gradient fallback. */
 function titleInitial(title: string): string {
   const trimmed = String(title || '').trim();
-  return trimmed ? Array.from(trimmed)[0] : '葱';
+  return trimmed ? Array.from(trimmed)[0] : t('brand.mark');
 }
 
 function coverFallbackChar(stream: LiveStream): string {
@@ -100,18 +113,8 @@ function looksLikeSdp(text: string): boolean {
   return value.startsWith('v=0') && /^m=/m.test(value);
 }
 
-/** Turn a non-2xx WHEP response into a short, human readable status message. */
-function describeWhepFailure(status: number, body: string): string {
-  const hints: Record<number, string> = {
-    400: '请求中的 SDP 无效',
-    401: '登录状态已失效，请重新登录',
-    403: '没有观看该直播的权限',
-    404: '直播不存在或已下架',
-    409: '主播尚未开播',
-    429: '请求过于频繁，请稍后重试',
-    502: '媒体服务器（SRS）暂时不可用',
-    504: '媒体服务器（SRS）响应超时',
-  };
+/** Extract a short JSON/plain-text error detail from a non-2xx media response. */
+function mediaErrorDetail(body: string): string {
   let detail = '';
   try {
     const data = JSON.parse(body);
@@ -123,14 +126,34 @@ function describeWhepFailure(status: number, body: string): string {
   if (!detail && body.trim() && !body.trim().startsWith('v=')) {
     detail = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
   }
-  return `WHEP 请求失败（HTTP ${status}）：${detail || hints[status] || '未知错误'}`;
+  return detail;
+}
+
+const WHEP_HINT_KEYS: Record<number, I18nKey> = {
+  400: 'whep.hint.400',
+  401: 'whep.hint.401',
+  403: 'whep.hint.403',
+  404: 'whep.hint.404',
+  409: 'whep.hint.409',
+  429: 'whep.hint.429',
+  502: 'whep.hint.502',
+  504: 'whep.hint.504',
+};
+
+/** Turn a non-2xx WHEP response into a short, human readable status message. */
+function describeWhepFailure(status: number, body: string): LocalizedError {
+  const detail = mediaErrorDetail(body);
+  return new LocalizedError(msg('whep.fail', {
+    status,
+    detail: detail ? backendText(detail, status) : msg(WHEP_HINT_KEYS[status] ?? 'whep.hint.generic'),
+  }));
 }
 
 type PublishSource = 'camera' | 'screen';
 const PUBLISH_RESOLUTIONS = [
-  { key: '720p', width: 1280, height: 720, label: '720p（1280×720）' },
-  { key: '540p', width: 960, height: 540, label: '540p（960×540）' },
-  { key: '360p', width: 640, height: 360, label: '360p（640×360）' },
+  { key: '720p', width: 1280, height: 720, labelKey: 'publish.res720p' },
+  { key: '540p', width: 960, height: 540, labelKey: 'publish.res540p' },
+  { key: '360p', width: 640, height: 360, labelKey: 'publish.res360p' },
 ] as const;
 type PublishResolutionKey = (typeof PUBLISH_RESOLUTIONS)[number]['key'];
 const PUBLISH_FPS = [30, 24, 15] as const;
@@ -151,59 +174,59 @@ type Publisher = {
   sourceVideo: HTMLVideoElement | null;
 };
 
+const WHIP_HINT_KEYS: Record<number, I18nKey> = {
+  400: 'whip.hint.400',
+  401: 'whip.hint.401',
+  403: 'whip.hint.403',
+  404: 'whip.hint.404',
+  409: 'whip.hint.409',
+  429: 'whip.hint.429',
+  502: 'whip.hint.502',
+  504: 'whip.hint.504',
+};
+
 /** Turn a non-2xx WHIP response into a short, human readable publish error. */
-function describeWhipFailure(status: number, body: string): string {
-  const hints: Record<number, string> = {
-    400: '提交的 SDP 无效',
-    401: '登录状态已失效，请重新登录',
-    403: '没有开播权限：只能推流自己的直播间',
-    404: '直播间不存在或已被下架',
-    409: '该直播间当前不可推流',
-    429: '请求过于频繁，请稍后重试',
-    502: '媒体服务器（SRS）暂时不可用，请检查 SRS 与 1985 内部端口',
-    504: '媒体服务器（SRS）响应超时',
-  };
-  let detail = '';
-  try {
-    const data = JSON.parse(body);
-    if (typeof data?.error === 'string') detail = data.error;
-    else if (typeof data?.detail === 'string') detail = data.detail;
-  } catch {
-    // Not JSON: gateway HTML or plain text, trimmed below.
-  }
-  if (!detail && body.trim() && !body.trim().startsWith('v=')) {
-    detail = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
-  }
-  return `WHIP 推流失败（HTTP ${status}）：${detail || hints[status] || '未知错误'}`;
+function describeWhipFailure(status: number, body: string): LocalizedError {
+  const detail = mediaErrorDetail(body);
+  return new LocalizedError(msg('whip.fail', {
+    status,
+    detail: detail ? backendText(detail, status) : msg(WHIP_HINT_KEYS[status] ?? 'whip.hint.generic'),
+  }));
+}
+
+/** User-visible label for the selected publish source. */
+function sourceText(source: PublishSource): TextMessage {
+  return msg(source === 'screen' ? 'msg.sourceScreenShare' : 'msg.sourceCameraMic');
 }
 
 /** Explain getUserMedia/getDisplayMedia failures instead of leaking DOMException names. */
-function describeMediaFailure(error: any, source: PublishSource): string {
+function describeMediaFailure(error: any, source: PublishSource): TextMessage {
   const name = String(error?.name || '');
+  const detail: TextMessage = error?.message ? rawText(String(error.message)) : msg('common.unknownError');
   if (source === 'screen') {
     switch (name) {
       case 'NotAllowedError':
       case 'SecurityError':
-        return '屏幕共享被取消或未授权：开播需要允许共享屏幕（也可改用「摄像头」视频源）';
+        return msg('media.screenCancelled');
       case 'NotSupportedError':
-        return '当前浏览器不支持屏幕共享（getDisplayMedia），请改用「摄像头」视频源或新版 Chrome/Edge';
+        return msg('media.screenUnsupported');
       default:
-        return `获取屏幕画面失败：${error?.message || '未知错误'}`;
+        return msg('media.screenFailed', { detail });
     }
   }
   switch (name) {
     case 'NotAllowedError':
     case 'SecurityError':
-      return '摄像头或麦克风权限被拒绝：请点击地址栏的权限图标允许后重试';
+      return msg('media.permissionDenied');
     case 'NotFoundError':
     case 'OverconstrainedError':
-      return '未找到可用的摄像头/麦克风，或设备不支持所选分辨率与帧率';
+      return msg('media.deviceNotFound');
     case 'NotReadableError':
-      return '摄像头或麦克风被其他程序占用，请关闭占用设备后重试';
+      return msg('media.deviceBusy');
     case 'NotSupportedError':
-      return '当前浏览器不支持摄像头采集（getUserMedia）';
+      return msg('media.captureUnsupported');
     default:
-      return `获取摄像头/麦克风失败：${error?.message || '未知错误'}`;
+      return msg('media.captureFailed', { detail });
   }
 }
 
@@ -235,13 +258,13 @@ function preferH264(pc: RTCPeerConnection) {
   }
 }
 
-function live2dPhaseLabel(phase: string): string {
+function live2dPhaseLabel(phase: string): I18nKey {
   switch (phase) {
-    case 'core': return '加载 Core';
-    case 'model': return '加载模型';
-    case 'ready': return '已就绪';
-    case 'error': return '加载失败';
-    default: return '未加载';
+    case 'core': return 'live2d.phase.core';
+    case 'model': return 'live2d.phase.model';
+    case 'ready': return 'live2d.phase.ready';
+    case 'error': return 'live2d.phase.error';
+    default: return 'live2d.phase.idle';
   }
 }
 
@@ -250,14 +273,15 @@ function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [password, setPassword] = useState('');
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState<TextMessage[]>([]);
   const [chatStreamId, setChatStreamId] = useState<number | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const [chatState, setChatState] = useState('选择一间正在直播的房间加入弹幕');
-  const [rtcStatus, setRtcStatus] = useState<RtcStatus>(() => (localStorage.getItem('token')
-    ? { text: '在右侧大厅选择一间正在直播的房间开始观看', tone: 'idle' }
-    : { text: '未登录：观看直播需要先登录，登录后通过 WHEP 实时播放', tone: 'idle' }));
+  const [chatState, setChatState] = useState<TextMessage>(msg('chat.pickRoom'));
+  const [rtcStatus, setRtcStatus] = useState<RtcStatus>(() => ({
+    text: msg(localStorage.getItem('token') ? 'rtc.idlePicking' : 'rtc.idleSignedOut'),
+    tone: 'idle',
+  }));
   const [retryNonce, setRetryNonce] = useState(0);
   // Browser publishing (WHIP) settings and runtime state.
   const [publishSource, setPublishSource] = useState<PublishSource>('camera');
@@ -266,17 +290,19 @@ function App() {
   const [publishTitle, setPublishTitle] = useState('');
   const [publishOverlay, setPublishOverlay] = useState(false);
   const [publishing, setPublishing] = useState(false);
-  const [publishStatus, setPublishStatus] = useState<RtcStatus>(() => (window.isSecureContext
-    ? { text: '未开播：选择视频源、分辨率与帧率后点击「开始开播」', tone: 'idle' }
-    : { text: '浏览器推流需要 HTTPS：当前页面不是安全上下文，开播按钮已禁用（观看、WHEP 与弹幕不受影响）', tone: 'warn' }));
+  const [publishStatus, setPublishStatus] = useState<RtcStatus>(() => ({
+    text: msg(window.isSecureContext ? 'publish.idle' : 'publish.idleInsecure'),
+    tone: window.isSecureContext ? 'idle' : 'warn',
+  }));
   // Cover image: compressed locally, uploaded after the stream is created.
   const [cover, setCover] = useState<PreparedCover | null>(null);
   const [coverBusy, setCoverBusy] = useState(false);
-  const [coverError, setCoverError] = useState('');
+  const [coverError, setCoverError] = useState<TextMessage | null>(null);
   const [lastCreated, setLastCreated] = useState<LastCreatedStream | null>(null);
   // Live2D loader input (persisted between visits).
   const [live2dInput, setLive2dInput] = useState(() => localStorage.getItem('live2d.modelUrl') || '');
   const live2dState = useLive2DState();
+  const lang = useLang();
   const secureContext = window.isSecureContext;
   const video = useRef<HTMLVideoElement>(null);
   const previewVideo = useRef<HTMLVideoElement>(null);
@@ -289,6 +315,11 @@ function App() {
   const rtcToneRef = useRef<RtcTone>('idle');
   const chatEnd = useRef<HTMLDivElement>(null);
 
+  /** Show one or more translatable message lines (no parts clears the notice). */
+  const showMessage = (...parts: Array<TextMessage | null | undefined>) => {
+    setMessage(parts.filter((part): part is TextMessage => Boolean(part)));
+  };
+
   async function load() {
     try {
       const r = await fetch(`${API}/api/streams`, { cache: 'no-store' });
@@ -296,7 +327,9 @@ function App() {
       const data = await r.json();
       setStreams(Array.isArray(data) ? data.filter((s: LiveStream) => s.is_live === true && !!s.whepPath) : []);
     } catch (e: any) {
-      setMessage(`无法读取直播列表：${e?.message || '请检查后端地址'}`);
+      showMessage(msg('msg.streamListFailed', {
+        detail: e?.message ? rawText(String(e.message)) : msg('msg.checkBackend'),
+      }));
     }
   }
 
@@ -310,6 +343,11 @@ function App() {
   useEffect(() => {
     attachLive2DPanel(live2dHost.current);
   }, [live2dState.hasModel]);
+
+  // Canvas aria-labels are set when the model loads; refresh them on language switch.
+  useEffect(() => {
+    getLive2DCanvas()?.setAttribute('aria-label', t('live2d.canvasLabel'));
+  }, [lang]);
 
   // WebRTC playback uses WHEP (SDP offer/answer) instead of HLS or HTTP-FLV.
   useEffect(() => {
@@ -331,7 +369,7 @@ function App() {
     const controller = new AbortController();
     const remoteStream = new MediaStream();
 
-    const status = (text: string, tone: RtcTone) => {
+    const status = (text: TextMessage, tone: RtcTone) => {
       if (closed) return;
       rtcToneRef.current = tone;
       setRtcStatus({ text, tone });
@@ -371,15 +409,13 @@ function App() {
 
     if (!streamId || !authToken) {
       playbackTeardown.current = null;
-      status(authToken
-        ? '在右侧大厅选择一间正在直播的房间开始观看'
-        : '未登录：观看直播需要先登录，登录后通过 WHEP 实时播放', 'idle');
+      status(authToken ? msg('rtc.idlePicking') : msg('rtc.idleSignedOut'), 'idle');
       return;
     }
     if (!element) return;
 
     playbackTeardown.current = release;
-    setRtcStatus({ text: '正在建立 WHEP 连接…', tone: 'info' });
+    setRtcStatus({ text: msg('rtc.connectingWhep'), tone: 'info' });
 
     pc = new RTCPeerConnection({
       // SRS publishes a public ICE candidate; STUN helps clients behind NAT discover their public mapping.
@@ -397,7 +433,7 @@ function App() {
       lastFrameAt = Date.now();
       if (stalled) {
         stalled = false;
-        status('直播画面已恢复', 'ok');
+        status(msg('rtc.resumed'), 'ok');
       }
     };
     const watchVideoFrame = () => {
@@ -429,30 +465,30 @@ function App() {
       }
       if (!stalled && Date.now() - lastFrameAt > 10000 && rtcToneRef.current !== 'error') {
         stalled = true;
-        status('直播画面已停止更新超过 10 秒：主播可能已停止推流，可重新加入房间', 'warn');
+        status(msg('rtc.stalled'), 'warn');
       }
     }, 2000);
 
     // After media was flowing, "connection failed" usually means the stream ended rather
     // than a firewall problem, so word the message accordingly.
-    const connectionFailureText = (layer: 'WebRTC' | 'ICE') => (receivedTrack
-      ? `${layer} 连接中断：直播可能已结束；若主播仍在推流，请检查服务器 UDP 8000 / TCP 8000 与 CANDIDATE 配置`
-      : `${layer} 连接失败：请确认服务器 UDP 8000 / TCP 8000 已放行，且 CANDIDATE 配置为公网 IP`);
+    const connectionFailureText = (layer: 'WebRTC' | 'ICE'): TextMessage => (receivedTrack
+      ? msg('rtc.connectionLost', { layer })
+      : msg('rtc.connectionFailed', { layer }));
 
     const startPlayback = async () => {
       if (closed || !element) return;
       try {
         await element.play();
-        if (!closed) status('WebRTC 播放中：已通过 WHEP 接收音视频', 'ok');
+        if (!closed) status(msg('rtc.playing'), 'ok');
       } catch {
         // Autoplay with sound is often blocked; retry muted so the picture still shows.
         element.muted = true;
         mutedByFallback = true;
         try {
           await element.play();
-          if (!closed) status('浏览器阻止了带声音的自动播放，已静音播放；可在播放器上取消静音', 'warn');
+          if (!closed) status(msg('rtc.autoplayMuted'), 'warn');
         } catch {
-          if (!closed) status('媒体已到达，请点击视频上的播放按钮开始播放', 'warn');
+          if (!closed) status(msg('rtc.clickPlay'), 'warn');
         }
       }
     };
@@ -476,12 +512,12 @@ function App() {
         if (closed) return;
         remoteStream.removeTrack(track);
         if (remoteStream.getTracks().length === 0) {
-          status('远端媒体流已结束：主播可能已停止推流，可重新加入房间或点击重新连接', 'warn');
+          status(msg('rtc.remoteEnded'), 'warn');
         }
       };
       if (!receivedTrack) {
         receivedTrack = true;
-        status('已收到音视频轨道，正在播放…', 'info');
+        status(msg('rtc.tracksReceived'), 'info');
       }
       void startPlayback();
     };
@@ -490,10 +526,10 @@ function App() {
       if (closed || !pc) return;
       switch (pc.connectionState) {
         case 'connected':
-          status('WebRTC 已连接', 'ok');
+          status(msg('rtc.connected'), 'ok');
           break;
         case 'disconnected':
-          status('WebRTC 连接中断，正在尝试恢复…', 'warn');
+          status(msg('rtc.disconnected'), 'warn');
           break;
         case 'failed':
           status(connectionFailureText('WebRTC'), 'error');
@@ -501,7 +537,7 @@ function App() {
         case 'closed':
           break;
         default:
-          status(`WebRTC：${pc.connectionState}`, 'info');
+          status(msg('rtc.state', { state: pc.connectionState }), 'info');
       }
     };
 
@@ -509,14 +545,14 @@ function App() {
       if (closed || !pc) return;
       switch (pc.iceConnectionState) {
         case 'checking':
-          status('正在建立 ICE 连接…', 'info');
+          status(msg('rtc.iceChecking'), 'info');
           break;
         case 'connected':
         case 'completed':
-          status('ICE 已联通，正在接收媒体…', 'ok');
+          status(msg('rtc.iceConnected'), 'ok');
           break;
         case 'disconnected':
-          status('ICE 连接中断，正在尝试恢复…', 'warn');
+          status(msg('rtc.iceDisconnected'), 'warn');
           break;
         case 'failed':
           status(connectionFailureText('ICE'), 'error');
@@ -534,7 +570,7 @@ function App() {
         const gathering = await waitForIceGathering(pc, controller.signal, 12000);
         if (closed || gathering === 'aborted' || !pc) return;
         if (gathering === 'timeout') {
-          status('ICE 候选收集超时（12 秒），已用已收集的候选继续协商…', 'warn');
+          status(msg('rtc.iceTimeout'), 'warn');
         }
 
         const response = await fetch(`${API}/api/streams/${streamId}/whep`, {
@@ -545,19 +581,19 @@ function App() {
         });
         const answer = await response.text();
         if (closed) return;
-        if (!response.ok) throw new Error(describeWhepFailure(response.status, answer));
-        if (!looksLikeSdp(answer)) throw new Error('媒体服务器返回的 SDP Answer 无效（可能被网关拦截或 SRS 异常）');
+        if (!response.ok) throw describeWhepFailure(response.status, answer);
+        if (!looksLikeSdp(answer)) throw new LocalizedError(msg('rtc.badAnswer'));
         await pc.setRemoteDescription({ type: 'answer', sdp: answer });
         if (closed) return;
-        status('WHEP 信令完成，等待音视频轨道…', 'info');
+        status(msg('rtc.signalingDone'), 'info');
         mediaTimer = window.setTimeout(() => {
           if (closed || receivedTrack) return;
-          status('信令已完成，但 15 秒内未收到音视频轨道：请确认主播端仍在推流，且 ICE 没有被网络阻断', 'warn');
+          status(msg('rtc.noTracks'), 'warn');
         }, 15000);
       } catch (error: any) {
         if (closed) return;
         if (error?.name === 'AbortError') return;
-        status(`WebRTC 播放失败：${error?.message || '未知错误'}`, 'error');
+        status(msg('rtc.playFailed', { detail: errorMessage(error, msg('common.unknownError')) }), 'error');
         // Signaling failed: stop ICE checks instead of leaving a half-open transport.
         controller.abort();
         if (pc) {
@@ -580,7 +616,7 @@ function App() {
       chatSocket.current?.close();
       chatSocket.current = null;
       setChatMessages([]);
-      setChatState('选择一间正在直播的房间加入弹幕');
+      setChatState(msg('chat.pickRoom'));
       return;
     }
     const wsBase = API ? API.replace(/^http/, 'ws') : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
@@ -588,21 +624,21 @@ function App() {
     chatSocket.current = socket;
     let disposed = false;
     setChatMessages([]);
-    setChatState('正在连接弹幕…');
+    setChatState(msg('chat.connecting'));
     socket.onopen = () => { if (!disposed) socket.send(JSON.stringify({ type: 'auth', token, streamId: chatStreamId })); };
     socket.onmessage = (event) => {
       if (disposed) return;
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'ready') { setChatMessages(data.messages || []); setChatState('实时弹幕已连接'); }
+        if (data.type === 'ready') { setChatMessages(data.messages || []); setChatState(msg('chat.connected')); }
         else if (data.type === 'message') setChatMessages((prev) => [...prev, data.message].slice(-100));
-        else if (data.type === 'warning' || data.type === 'error') setChatState(data.message || '弹幕异常');
+        else if (data.type === 'warning' || data.type === 'error') setChatState(data.message ? backendText(String(data.message)) : msg('chat.error'));
       } catch { /* Ignore malformed server messages. */ }
     };
     // Ignore close/error events fired by a socket we already abandoned, so a stale
     // "disconnected" message cannot overwrite the state of the room we just joined.
-    socket.onclose = (event) => { if (!disposed) setChatState(event.code === 4403 ? '直播间已关闭或账号不可用' : '弹幕连接已断开'); };
-    socket.onerror = () => { if (!disposed) setChatState('弹幕连接失败'); };
+    socket.onclose = (event) => { if (!disposed) setChatState(msg(event.code === 4403 ? 'chat.closed' : 'chat.disconnected')); };
+    socket.onerror = () => { if (!disposed) setChatState(msg('chat.connectFailed')); };
     return () => {
       disposed = true;
       socket.close();
@@ -625,7 +661,7 @@ function App() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
       });
       const data = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+      if (!r.ok) throw new LocalizedError(backendText(String(data?.error || `HTTP ${r.status}`), r.status));
       if (path === 'login') {
         setToken(data.token);
         localStorage.setItem('token', data.token);
@@ -633,13 +669,13 @@ function App() {
         setUsername(name);
         localStorage.setItem('username', name);
       }
-      setMessage(path === 'login' ? '登录成功' : '注册成功，请登录');
-    } catch (error: any) { setMessage(error.message); }
+      showMessage(msg(path === 'login' ? 'auth.loginSuccess' : 'auth.registerSuccess'));
+    } catch (error: any) { showMessage(errorMessage(error, msg('common.unknownError'))); }
   }
 
   async function create() {
-    if (!token) { setMessage('请先登录'); return; }
-    const title = `${username || '用户'}的直播`;
+    if (!token) { showMessage(msg('msg.needLogin')); return; }
+    const title = t('msg.userStreamTitle', { name: username || msg('common.userName') });
     try {
       const response = await fetch(`${API}/api/streams`, {
         method: 'POST',
@@ -647,25 +683,34 @@ function App() {
         body: JSON.stringify({ title }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+      if (!response.ok) {
+        throw new LocalizedError(data?.error
+          ? backendText(String(data.error), response.status)
+          : backendText('', response.status));
+      }
       const id = Number(data?.id);
       if (Number.isSafeInteger(id) && id > 0) setLastCreated({ id, title, coverUrl: null });
-      setMessage(`直播间创建成功${Number.isSafeInteger(id) && id > 0 ? `（#${id}）` : ''}。现在可直接在「浏览器开播」卡片开始推流，或在 Android 客户端开播。\n传输协议：${data?.transport}`);
+      showMessage(
+        msg('msg.streamCreated', {
+          idPart: Number.isSafeInteger(id) && id > 0 ? msg('msg.idPart', { id }) : '',
+        }),
+        msg('msg.createdTransport', { transport: String(data?.transport ?? '') }),
+      );
       await load();
-    } catch (error: any) { setMessage(error.message); }
+    } catch (error: any) { showMessage(errorMessage(error, msg('common.unknownError'))); }
   }
 
   /** Compress the selected cover into a <=2MB JPEG data URL. */
   async function handleCoverFile(file: File | undefined) {
     if (!file) return;
     setCoverBusy(true);
-    setCoverError('');
+    setCoverError(null);
     try {
       const prepared = await prepareCover(file);
       setCover(prepared);
     } catch (error: any) {
       setCover(null);
-      setCoverError(error?.message || '封面处理失败，请换一张图片');
+      setCoverError(errorMessage(error, msg('cover.processFailed')));
     } finally {
       setCoverBusy(false);
       if (coverInput.current) coverInput.current.value = '';
@@ -674,18 +719,21 @@ function App() {
 
   /** Upload the prepared cover to the most recently created stream. */
   async function uploadCoverToLastCreated() {
-    if (!token) { setCoverError('请先登录'); return; }
-    if (!lastCreated) { setCoverError('请先创建直播间'); return; }
-    if (!cover) { setCoverError('请先选择封面图片'); return; }
+    if (!token) { setCoverError(msg('msg.needLogin')); return; }
+    if (!lastCreated) { setCoverError(msg('cover.needCreateRoom')); return; }
+    if (!cover) { setCoverError(msg('cover.needCover')); return; }
     setCoverBusy(true);
-    setCoverError('');
+    setCoverError(null);
     try {
       const coverUrl = await uploadCover(API, token, lastCreated.id, cover.dataUrl);
       setLastCreated({ ...lastCreated, coverUrl });
-      setMessage(`封面已上传到直播间 #${lastCreated.id}\n封面地址：${resolveAssetUrl(API, coverUrl)}`);
+      showMessage(msg('msg.coverUploaded', {
+        id: lastCreated.id,
+        url: resolveAssetUrl(API, coverUrl),
+      }));
       await load();
     } catch (error: any) {
-      setCoverError(error?.message || '封面上传失败');
+      setCoverError(errorMessage(error, msg('cover.uploadFailedFallback')));
     } finally {
       setCoverBusy(false);
     }
@@ -723,14 +771,14 @@ function App() {
     if (notice) setPublishStatus(notice);
   }
 
-  function stopPublish(notice = '已停止推流：本地预览已关闭，PeerConnection、音视频轨道与摄像头/屏幕采集均已释放') {
+  function stopPublish(notice: TextMessage = msg('msg.publishStopped')) {
     if (!publisher.current) {
       setPublishing(false);
       if (previewVideo.current?.srcObject) previewVideo.current.srcObject = null;
       return;
     }
-    releasePublisher({ text: '已停止开播：本地预览与音视频采集已释放', tone: 'idle' });
-    setMessage(notice);
+    releasePublisher({ text: msg('publish.stopped'), tone: 'idle' });
+    showMessage(notice);
     // SRS calls on_unpublish when the PeerConnection closes; refresh the lobby.
     void load();
   }
@@ -759,15 +807,12 @@ function App() {
         runtime.sourceVideo = null;
       }
       if (previewVideo.current) previewVideo.current.srcObject = runtime.stream;
-      setPublishStatus({ text: '已关闭 Live2D 叠加：推流恢复原始画面，音频保持不变', tone: 'info' });
+      setPublishStatus({ text: msg('publish.overlayOff'), tone: 'info' });
       return;
     }
     const modelCanvas = getLive2DCanvas();
     if (!modelCanvas) {
-      setPublishStatus({
-        text: '尚未加载 Live2D 模型：推流保持原始画面。请先在「Live2D 看板娘」面板加载模型，再开启叠加。',
-        tone: 'warn',
-      });
+      setPublishStatus({ text: msg('publish.overlayNoModel'), tone: 'warn' });
       return;
     }
     try {
@@ -795,12 +840,15 @@ function App() {
       const handle = createOverlayStream(source, { width: 1280, height: 720, fps: runtime.fps });
       runtime.composite = handle;
       const track = handle.stream.getVideoTracks()[0];
-      if (!track) throw new Error('合成画布没有生成视频轨');
+      if (!track) throw new LocalizedError(msg('publish.noVideoTrack'));
       await videoSender.replaceTrack(track);
       if (previewVideo.current) previewVideo.current.srcObject = handle.stream;
-      setPublishStatus({ text: '已开启 Live2D 叠加：观众看到的画面已合成看板娘，音频保持不变', tone: 'ok' });
+      setPublishStatus({ text: msg('publish.overlayOn'), tone: 'ok' });
     } catch (error: any) {
-      setPublishStatus({ text: `开启 Live2D 叠加失败：${error?.message || '未知错误'}`, tone: 'error' });
+      setPublishStatus({
+        text: msg('publish.overlayEnableFailed', { detail: errorMessage(error, msg('common.unknownError')) }),
+        tone: 'error',
+      });
     }
   }
 
@@ -809,35 +857,35 @@ function App() {
     setPublishOverlay(next);
     if (publisher.current?.pc) void applyPublisherOverlay(next);
     else if (next && !live2dState.hasModel) {
-      setPublishStatus({ text: '尚未加载 Live2D 模型：开播时会保持原始画面；加载模型后可再开启叠加', tone: 'warn' });
+      setPublishStatus({ text: msg('publish.overlayNoModelWarn'), tone: 'warn' });
     }
   }
 
   async function startPublish() {
     if (publishing || publisher.current) return;
     if (!token) {
-      setPublishStatus({ text: '开播需要先登录：请在上方登录或注册账号后重试', tone: 'warn' });
+      setPublishStatus({ text: msg('publish.needLogin'), tone: 'warn' });
       return;
     }
     if (!window.isSecureContext) {
-      setPublishStatus({ text: '浏览器推流需要 HTTPS：当前页面不是安全上下文，无法访问摄像头/屏幕采集', tone: 'error' });
+      setPublishStatus({ text: msg('publish.insecure'), tone: 'error' });
       return;
     }
     const devices = navigator.mediaDevices;
     const source = publishSource;
     if (!devices || typeof devices.getUserMedia !== 'function') {
-      setPublishStatus({ text: '当前浏览器不支持 WebRTC 媒体采集，请更换新版 Chrome / Edge / Safari', tone: 'error' });
+      setPublishStatus({ text: msg('publish.noWebrtc'), tone: 'error' });
       return;
     }
     if (source === 'screen' && typeof devices.getDisplayMedia !== 'function') {
-      setPublishStatus({ text: '当前浏览器不支持屏幕共享（getDisplayMedia），请改用「摄像头」视频源', tone: 'error' });
+      setPublishStatus({ text: msg('publish.noDisplayMedia'), tone: 'error' });
       return;
     }
     const resolution = PUBLISH_RESOLUTIONS.find((item) => item.key === publishResolution) ?? PUBLISH_RESOLUTIONS[0];
     const fps = publishFps;
     const wantedOverlay = publishOverlay;
     const preparedCover = cover;
-    const title = publishTitle.trim() || `${username || '用户'}的直播`;
+    const title = publishTitle.trim() || t('msg.userStreamTitle', { name: username || msg('common.userName') });
     const controller = new AbortController();
     const runtime: Publisher = {
       controller,
@@ -850,7 +898,7 @@ function App() {
     };
     publisher.current = runtime;
     setPublishing(true);
-    setPublishStatus({ text: '正在创建直播间…', tone: 'info' });
+    setPublishStatus({ text: msg('publish.creating'), tone: 'info' });
     try {
       // 1. Create the stream record on the backend and get its WHIP publish path.
       const response = await fetch(`${API}/api/streams`, {
@@ -861,26 +909,32 @@ function App() {
       });
       const data = await response.json().catch(() => null);
       if (publisher.current !== runtime) return;
-      if (!response.ok) throw new Error(data?.error || `创建直播间失败（HTTP ${response.status}）`);
+      if (!response.ok) {
+        throw new LocalizedError(data?.error
+          ? backendText(String(data.error), response.status)
+          : msg('publish.createFailed', { status: response.status }));
+      }
       const streamId = Number(data?.id);
       const publishPath = typeof data?.publishPath === 'string' && data.publishPath
         ? data.publishPath
         : (Number.isSafeInteger(streamId) && streamId > 0 ? `/api/streams/${streamId}/whip` : '');
       if (!Number.isSafeInteger(streamId) || streamId < 1 || !publishPath) {
-        throw new Error('创建直播间响应缺少 id 或 publishPath');
+        throw new LocalizedError(msg('publish.badCreateResponse'));
       }
 
       // 2. Upload the compressed cover (if selected) before going live.
       let uploadedCoverUrl: string | null = null;
-      let coverNote = '';
+      let coverNote: TextMessage | null = null;
       if (preparedCover) {
-        setPublishStatus({ text: '直播间已创建，正在上传封面…', tone: 'info' });
+        setPublishStatus({ text: msg('publish.uploadingCover'), tone: 'info' });
         try {
           uploadedCoverUrl = await uploadCover(API, token, streamId, preparedCover.dataUrl);
-          coverNote = `\n封面已上传：${resolveAssetUrl(API, uploadedCoverUrl)}`;
+          coverNote = msg('msg.coverUploadedNote', { url: resolveAssetUrl(API, uploadedCoverUrl) });
         } catch (error: any) {
-          coverNote = `\n封面上传失败：${error?.message || '未知错误'}`;
-          setCoverError(error?.message || '封面上传失败');
+          coverNote = msg('msg.coverUploadFailedNote', {
+            detail: errorMessage(error, msg('common.unknownError')),
+          });
+          setCoverError(errorMessage(error, msg('cover.uploadFailedFallback')));
         }
         if (publisher.current !== runtime) return;
       }
@@ -888,7 +942,7 @@ function App() {
 
       // 3. Capture camera or screen with ideal resolution/frame-rate constraints.
       setPublishStatus({
-        text: source === 'screen' ? '请在弹出的窗口中选择要共享的屏幕…' : '正在请求摄像头与麦克风权限…',
+        text: msg(source === 'screen' ? 'publish.pickShareTarget' : 'publish.requestingDevice'),
         tone: 'info',
       });
       const videoConstraints: MediaTrackConstraints = {
@@ -904,10 +958,10 @@ function App() {
       runtime.originalVideoTrack = capture.getVideoTracks()[0] ?? null;
 
       // 4. Optional Live2D compositing: a hidden <video> feeds the overlay canvas.
-      let overlayNote = '';
+      let overlayNote: TextMessage | null = null;
       if (wantedOverlay) {
         if (!getLive2DCanvas()) {
-          overlayNote = '\n未加载 Live2D 模型：本次开播保持原始画面。';
+          overlayNote = msg('msg.overlayMissingNote');
         } else {
           try {
             const overlaySource = document.createElement('video');
@@ -923,7 +977,9 @@ function App() {
             });
           } catch (error: any) {
             if (runtime.composite) { runtime.composite.stop(); runtime.composite = null; }
-            overlayNote = `\nLive2D 叠加不可用（${error?.message || '未知错误'}）：本次开播保持原始画面。`;
+            overlayNote = msg('msg.overlayUnavailableNote', {
+              detail: errorMessage(error, msg('common.unknownError')),
+            });
           }
         }
       }
@@ -951,12 +1007,10 @@ function App() {
       runtime.originalVideoTrack?.addEventListener('ended', () => {
         if (publisher.current !== runtime) return;
         releasePublisher({
-          text: source === 'screen'
-            ? '屏幕共享已结束，推流已自动停止（SRS 会收到 on_unpublish）'
-            : '摄像头视频轨已结束，推流已自动停止',
+          text: msg(source === 'screen' ? 'publish.shareEnded' : 'publish.cameraEnded'),
           tone: 'warn',
         });
-        setMessage(source === 'screen' ? '屏幕共享已结束：浏览器开播已自动停止。' : '摄像头视频轨已结束：浏览器开播已自动停止。');
+        showMessage(msg(source === 'screen' ? 'publish.shareEndedMessage' : 'publish.cameraEndedMessage'));
         void load();
       });
       preferH264(pc);
@@ -964,13 +1018,13 @@ function App() {
         if (publisher.current !== runtime) return;
         switch (pc.connectionState) {
           case 'connected':
-            setPublishStatus({ text: '推流已连接：SRS 正在转发你的音视频', tone: 'ok' });
+            setPublishStatus({ text: msg('publish.streamingConnected'), tone: 'ok' });
             break;
           case 'disconnected':
-            setPublishStatus({ text: '推流连接中断，正在尝试恢复…', tone: 'warn' });
+            setPublishStatus({ text: msg('publish.disconnected'), tone: 'warn' });
             break;
           case 'failed':
-            setPublishStatus({ text: '推流连接失败：请检查服务器 UDP/TCP 8000 与 CANDIDATE 配置后重新开播', tone: 'error' });
+            setPublishStatus({ text: msg('publish.connectionFailed'), tone: 'error' });
             break;
           default:
             break;
@@ -980,14 +1034,14 @@ function App() {
         if (publisher.current !== runtime) return;
         switch (pc.iceConnectionState) {
           case 'checking':
-            setPublishStatus({ text: '正在建立 ICE 连接…', tone: 'info' });
+            setPublishStatus({ text: msg('publish.iceChecking'), tone: 'info' });
             break;
           case 'connected':
           case 'completed':
-            setPublishStatus({ text: 'ICE 已联通，浏览器推流中', tone: 'ok' });
+            setPublishStatus({ text: msg('publish.iceConnected'), tone: 'ok' });
             break;
           case 'failed':
-            setPublishStatus({ text: 'ICE 连接失败：请确认服务器 UDP 8000 / TCP 8000 已放行且 CANDIDATE 为公网 IP', tone: 'error' });
+            setPublishStatus({ text: msg('publish.iceFailed'), tone: 'error' });
             break;
           default:
             break;
@@ -998,11 +1052,11 @@ function App() {
       if (publisher.current !== runtime) return;
       await pc.setLocalDescription(offer);
       if (publisher.current !== runtime) return;
-      setPublishStatus({ text: '正在收集 ICE 候选（通常 1-12 秒）…', tone: 'info' });
+      setPublishStatus({ text: msg('publish.gathering'), tone: 'info' });
       const gathering = await waitForIceGathering(pc, controller.signal, 12000);
       if (publisher.current !== runtime) return;
       if (gathering === 'timeout') {
-        setPublishStatus({ text: 'ICE 候选收集超时（12 秒），已用已收集的候选继续协商…', tone: 'warn' });
+        setPublishStatus({ text: msg('publish.iceTimeout'), tone: 'warn' });
       }
 
       // 6. POST the offer to the authenticated WHIP proxy; the answer completes the session.
@@ -1018,41 +1072,53 @@ function App() {
       });
       const answer = await whipResponse.text();
       if (publisher.current !== runtime) return;
-      if (!whipResponse.ok) throw new Error(describeWhipFailure(whipResponse.status, answer));
-      if (!looksLikeSdp(answer)) throw new Error('媒体服务器返回的 SDP Answer 无效（可能被网关拦截或 SRS 异常）');
+      if (!whipResponse.ok) throw describeWhipFailure(whipResponse.status, answer);
+      if (!looksLikeSdp(answer)) throw new LocalizedError(msg('rtc.badAnswer'));
       await pc.setRemoteDescription({ type: 'answer', sdp: answer });
       if (publisher.current !== runtime) return;
-      const overlayLabel = runtime.composite ? ' · Live2D 叠加' : '';
+      const overlayLabel = runtime.composite ? msg('msg.overlayLabel') : '';
       setPublishStatus({
-        text: `推流中：#${streamId} · ${resolution.label} · ${fps}fps · ${source === 'screen' ? '屏幕共享' : '摄像头 + 麦克风'}${overlayLabel}`,
+        text: msg('publish.liveStatus', {
+          id: streamId,
+          resolution: msg(resolution.labelKey),
+          fps,
+          source: sourceText(source),
+          overlay: overlayLabel,
+        }),
         tone: 'ok',
       });
-      setMessage(
-        `浏览器开播已启动：直播间 #${streamId}（${title}）\n`
-        + `推流地址：${API}${publishPath}\n`
-        + `画面：${resolution.label} · ${fps}fps · ${source === 'screen' ? '屏幕共享' : '摄像头 + 麦克风'}${overlayLabel}`
-        + coverNote + overlayNote,
+      showMessage(
+        msg('msg.publishStarted', { id: streamId, title }),
+        msg('msg.publishUrl', { url: `${API}${publishPath}` }),
+        msg('msg.publishPicture', {
+          resolution: msg(resolution.labelKey),
+          fps,
+          source: sourceText(source),
+          overlay: overlayLabel,
+        }),
+        coverNote,
+        overlayNote,
       );
       await load();
     } catch (error: any) {
       if (publisher.current !== runtime) return;
       const aborted = error?.name === 'AbortError' || controller.signal.aborted;
       if (aborted) {
-        releasePublisher({ text: '已停止开播：本地预览与音视频采集已释放', tone: 'idle' });
+        releasePublisher({ text: msg('publish.stopped'), tone: 'idle' });
         return;
       }
       const text = PUBLISH_MEDIA_ERRORS.includes(String(error?.name))
         ? describeMediaFailure(error, source)
-        : `浏览器开播失败：${error?.message || '未知错误'}`;
+        : msg('publish.failed', { detail: errorMessage(error, msg('common.unknownError')) });
       releasePublisher({ text, tone: 'error' });
-      setMessage(`${text}\n如果直播间已创建但推流失败，可重试；成功后大厅会显示该直播间。`);
+      showMessage(text, msg('msg.publishFailureHint'));
     }
   }
 
   function joinRoom(stream: LiveStream) {
-    if (!token) { setMessage('观看直播需要登录：请先在上方登录，再进入房间观看 WHEP 直播并发送弹幕'); return; }
+    if (!token) { showMessage(msg('msg.watchNeedLogin')); return; }
     setChatStreamId(stream.id);
-    setChatState(`正在加入：${stream.title}`);
+    setChatState(msg('chat.joining', { title: stream.title }));
   }
 
   function leaveRoom() {
@@ -1069,20 +1135,20 @@ function App() {
   }
 
   function logout() {
-    stopPublish('已退出登录，浏览器推流已停止');
+    stopPublish(msg('msg.logoutStopped'));
     leaveRoom();
     setToken('');
     localStorage.removeItem('token');
     localStorage.removeItem('username');
-    setMessage('已退出登录');
+    showMessage(msg('msg.signedOut'));
   }
 
   function sendChat(event: React.FormEvent) {
     event.preventDefault();
     const content = chatInput.trim();
     if (!content) return;
-    if (!token) { setChatState('请先登录'); return; }
-    if (chatSocket.current?.readyState !== WebSocket.OPEN) { setChatState('弹幕尚未连接，请重新加入房间'); return; }
+    if (!token) { setChatState(msg('msg.needLogin')); return; }
+    if (chatSocket.current?.readyState !== WebSocket.OPEN) { setChatState(msg('chat.notConnected')); return; }
     chatSocket.current.send(JSON.stringify({ type: 'chat', content }));
     setChatInput('');
   }
@@ -1112,25 +1178,43 @@ function App() {
     <div className="app">
       <header className="topbar">
         <div className="topbar-inner">
-          <a className="brand" href="#top" aria-label="葱直播首页">
-            <span className="brand-mark" aria-hidden="true">葱</span>
-            <span className="brand-text">葱直播<small>CONGLIVE</small></span>
+          <a className="brand" href="#top" aria-label={t('brand.home')}>
+            <span className="brand-mark" aria-hidden="true">{t('brand.mark')}</span>
+            <span className="brand-text">{t('brand.name')}<small>{t('brand.sub')}</small></span>
           </a>
-          <nav className="topnav" aria-label="页面导航">
-            <a href="#lobby">直播大厅</a>
-            <a href="#watch">观看</a>
-            <a href="#publish">开播</a>
-            <a href="#live2d">Live2D</a>
-            <a href="#chat">弹幕</a>
+          <nav className="topnav" aria-label={t('nav.label')}>
+            <a href="#lobby">{t('nav.lobby')}</a>
+            <a href="#watch">{t('nav.watch')}</a>
+            <a href="#publish">{t('nav.publish')}</a>
+            <a href="#live2d">{t('nav.live2d')}</a>
+            <a href="#chat">{t('nav.chat')}</a>
           </nav>
           <div className="top-actions">
+            <div className="lang-switch" role="group" aria-label={t('lang.switch')}>
+              <button
+                type="button"
+                className={lang === 'zh' ? 'active' : ''}
+                aria-pressed={lang === 'zh'}
+                onClick={() => setLang('zh')}
+              >
+                {t('lang.zh')}
+              </button>
+              <button
+                type="button"
+                className={lang === 'en' ? 'active' : ''}
+                aria-pressed={lang === 'en'}
+                onClick={() => setLang('en')}
+              >
+                {t('lang.en')}
+              </button>
+            </div>
             <span className={`conn-pill ${token ? 'online' : ''}`}>
               <i aria-hidden="true" />
-              {token ? (username || '已登录') : '未登录'}
+              {token ? (username || t('topbar.signedIn')) : t('topbar.signedOut')}
             </span>
             {token
-              ? <button type="button" className="ghost small" onClick={logout}>退出登录</button>
-              : <a className="button small" href="#auth">登录 / 注册</a>}
+              ? <button type="button" className="ghost small" onClick={logout}>{t('topbar.logout')}</button>
+              : <a className="button small" href="#auth">{t('topbar.loginRegister')}</a>}
           </div>
         </div>
       </header>
@@ -1138,77 +1222,76 @@ function App() {
       <main className="page" id="top">
         <section className="hero">
           <div className="hero-copy">
-            <span className="eyebrow">WEBRTC · ULTRA LOW LATENCY</span>
-            <h1>分享你的实时世界<span>低延迟 · 高互动</span></h1>
-            <p className="hero-lead">
-              浏览器里的实时直播：WHEP 低延迟观看、WHIP 一键开播、实时弹幕，
-              还能让 Live2D 看板娘陪你一起出镜。
-            </p>
+            <span className="eyebrow">{t('hero.eyebrow')}</span>
+            <h1>{t('hero.title')}<span>{t('hero.titleAccent')}</span></h1>
+            <p className="hero-lead">{t('hero.lead')}</p>
             <div className="hero-badges">
-              <span>WHEP 观看</span>
-              <span>WHIP 开播</span>
-              <span>Live2D 叠加</span>
-              <span>实时弹幕</span>
+              <span>{t('hero.badge.whep')}</span>
+              <span>{t('hero.badge.whip')}</span>
+              <span>{t('hero.badge.live2d')}</span>
+              <span>{t('hero.badge.chat')}</span>
             </div>
           </div>
           <div className="auth-card" id="auth">
             {token ? (
               <div className="signed-in">
-                <span className="eyebrow">SIGNED IN</span>
-                <h2>{username || '已登录用户'}</h2>
-                <p className="hint">令牌已保存在本机，可以观看直播、发送弹幕，并直接在浏览器开播。</p>
+                <span className="eyebrow">{t('auth.eyebrowSignedIn')}</span>
+                <h2>{username || t('auth.signedInAs')}</h2>
+                <p className="hint">{t('auth.signedInHint')}</p>
                 <div className="auth-actions">
-                  <button type="button" className="secondary" onClick={() => void create()}>创建直播间</button>
-                  <button type="button" className="ghost" onClick={logout}>退出登录</button>
+                  <button type="button" className="secondary" onClick={() => void create()}>{t('auth.createRoom')}</button>
+                  <button type="button" className="ghost" onClick={logout}>{t('topbar.logout')}</button>
                 </div>
                 {lastCreated && (
-                  <p className="hint">最近创建：#{lastCreated.id} · {lastCreated.title}</p>
+                  <p className="hint">{t('auth.lastCreated', { id: lastCreated.id, title: lastCreated.title })}</p>
                 )}
               </div>
             ) : (
               <form className="auth-form" onSubmit={(event) => { event.preventDefault(); void auth('login'); }}>
-                <span className="eyebrow">登录后开始</span>
-                <h2>欢迎回来</h2>
+                <span className="eyebrow">{t('auth.eyebrowLogin')}</span>
+                <h2>{t('auth.welcomeBack')}</h2>
                 <label className="field">
-                  用户名
+                  {t('auth.username')}
                   <input
                     value={username}
                     autoComplete="username"
-                    placeholder="用户名"
+                    placeholder={t('auth.usernamePlaceholder')}
                     onChange={(e) => setUsername(e.target.value)}
                   />
                 </label>
                 <label className="field">
-                  密码
+                  {t('auth.password')}
                   <input
                     type="password"
                     value={password}
                     autoComplete="current-password"
-                    placeholder="密码（至少 8 位）"
+                    placeholder={t('auth.passwordPlaceholder')}
                     onChange={(e) => setPassword(e.target.value)}
                   />
                 </label>
                 <div className="auth-actions">
-                  <button type="submit">登录</button>
-                  <button type="button" className="secondary" onClick={() => void auth('register')}>注册</button>
+                  <button type="submit">{t('auth.login')}</button>
+                  <button type="button" className="secondary" onClick={() => void auth('register')}>{t('auth.register')}</button>
                 </div>
-                <p className="hint">观看直播需要登录；注册后即可进入大厅观看并发送弹幕。</p>
+                <p className="hint">{t('auth.loginHint')}</p>
               </form>
             )}
           </div>
         </section>
 
-        {message && <pre className="message" role="status" aria-live="polite">{message}</pre>}
+        {message.length > 0 && (
+          <pre className="message" role="status" aria-live="polite">{message.map(translateMessage).join('\n')}</pre>
+        )}
 
         <div className="main-grid">
           <section className="panel watch-panel" id="watch">
             <div className="panel-head">
               <div>
-                <span className="eyebrow">WHEP PLAYER</span>
-                <h2>WebRTC 直播观看</h2>
+                <span className="eyebrow">{t('watch.eyebrow')}</span>
+                <h2>{t('watch.title')}</h2>
               </div>
               <span className={`status-dot ${rtcStatus.tone}`}>
-                <i aria-hidden="true" />{selected ? selected.title : '等待选择房间'}
+                <i aria-hidden="true" />{selected ? selected.title : t('watch.waitingRoom')}
               </span>
             </div>
             <div className={`player ${chatStreamId ? 'has-stream' : ''}`}>
@@ -1217,42 +1300,42 @@ function App() {
                 controls
                 autoPlay
                 playsInline
-                aria-label="直播画面"
+                aria-label={t('watch.videoLabel')}
                 onClick={() => { void video.current?.play().catch(() => undefined); }}
               />
               {!chatStreamId && (
                 <div className="player-empty">
                   <span className="player-empty-icon" aria-hidden="true">▶</span>
-                  <p>{token ? '从直播大厅选择一间正在直播的房间' : '登录后即可观看 WHEP 实时直播'}</p>
+                  <p>{token ? t('watch.emptyPick') : t('watch.emptyLogin')}</p>
                 </div>
               )}
             </div>
             <div className="playrow">
-              <p className={`hint rtc-status ${rtcStatus.tone}`} role="status" aria-live="polite">{rtcStatus.text}</p>
+              <p className={`hint rtc-status ${rtcStatus.tone}`} role="status" aria-live="polite">{translateMessage(rtcStatus.text)}</p>
               {canRetry && (
                 <button type="button" className="secondary small" onClick={() => setRetryNonce((value) => value + 1)}>
-                  重新连接
+                  {t('watch.reconnect')}
                 </button>
               )}
             </div>
-            <p className="hint">加入直播间后通过 WHEP 与 SRS 建立 WebRTC 连接；不再使用 HLS 或 HTTP-FLV 播放直播。</p>
+            <p className="hint">{t('watch.hint')}</p>
           </section>
 
           <aside className="panel lobby-panel" id="lobby">
             <div className="panel-head">
               <div>
-                <span className="eyebrow">LIVE NOW</span>
-                <h2>直播大厅 <span className="count">{streams.length}</span></h2>
+                <span className="eyebrow">{t('lobby.eyebrow')}</span>
+                <h2>{t('lobby.title')} <span className="count">{streams.length}</span></h2>
               </div>
-              <button type="button" className="secondary small" onClick={() => void load()}>刷新列表</button>
+              <button type="button" className="secondary small" onClick={() => void load()}>{t('lobby.refresh')}</button>
             </div>
-            <p className="hint">仅展示正在直播且提供 WHEP 播放地址的房间。</p>
-            {!token && <p className="hint warn-text">未登录：观看直播需要先登录。登录后即可进入房间观看并发送弹幕。</p>}
+            <p className="hint">{t('lobby.hint')}</p>
+            {!token && <p className="hint warn-text">{t('lobby.signedOutHint')}</p>}
             {streams.length === 0 ? (
               <div className="lobby-empty">
                 <span className="lobby-empty-mark" aria-hidden="true">LIVE</span>
-                <p>当前没有正在直播的房间</p>
-                <small>主播在浏览器开播后，这里会自动出现直播卡片。</small>
+                <p>{t('lobby.emptyTitle')}</p>
+                <small>{t('lobby.emptyHint')}</small>
               </div>
             ) : (
               <div className="live-grid">
@@ -1264,7 +1347,7 @@ function App() {
                       className="live-card"
                       key={stream.id}
                       onClick={() => joinRoom(stream)}
-                      aria-label={`观看 ${stream.title}`}
+                      aria-label={t('lobby.watchRoom', { title: stream.title })}
                     >
                       <div className="live-cover" style={coverFallbackStyle(stream)}>
                         <span className="live-cover-char" aria-hidden="true">{coverFallbackChar(stream)}</span>
@@ -1276,12 +1359,12 @@ function App() {
                             onError={(event) => { event.currentTarget.style.display = 'none'; }}
                           />
                         )}
-                        <span className="live-badge"><i aria-hidden="true" />直播中</span>
+                        <span className="live-badge"><i aria-hidden="true" />{t('lobby.liveBadge')}</span>
                       </div>
                       <div className="live-meta">
                         <b>{stream.title}</b>
-                        <span className="live-owner">主播：{stream.username}</span>
-                        <span className="live-cta">{token ? '观看 / 弹幕 →' : '登录后观看 →'}</span>
+                        <span className="live-owner">{t('lobby.owner', { name: stream.username })}</span>
+                        <span className="live-cta">{token ? t('lobby.cta') : t('lobby.ctaSignedOut')}</span>
                       </div>
                     </button>
                   );
@@ -1294,53 +1377,51 @@ function App() {
         <section className="panel publish-panel" id="publish">
           <div className="panel-head">
             <div>
-              <span className="eyebrow">BROWSER PUBLISH · WHIP</span>
-              <h2>浏览器开播</h2>
-              <p className="hint">
-                本页直接用摄像头或屏幕推流给 SRS，观众仍通过 WHEP 观看；停止后 SRS 收到 on_unpublish，直播间自动下线。
-              </p>
+              <span className="eyebrow">{t('publish.eyebrow')}</span>
+              <h2>{t('publish.title')}</h2>
+              <p className="hint">{t('publish.hint')}</p>
             </div>
-            <span className={`state-pill ${publishing ? 'ok' : 'idle'}`}>{publishing ? '推流中' : '未开播'}</span>
+            <span className={`state-pill ${publishing ? 'ok' : 'idle'}`}>{publishing ? t('publish.stateLive') : t('publish.stateIdle')}</span>
           </div>
           <div className="publish-grid">
             <div className="publish-form">
               <div className="field-row">
-                <label className="field">视频源
+                <label className="field">{t('publish.source')}
                   <select value={publishSource} disabled={publishing} onChange={(e) => setPublishSource(e.target.value as PublishSource)}>
-                    <option value="camera">摄像头 + 麦克风</option>
-                    <option value="screen">屏幕共享</option>
+                    <option value="camera">{t('publish.sourceCamera')}</option>
+                    <option value="screen">{t('publish.sourceScreen')}</option>
                   </select>
                 </label>
-                <label className="field">分辨率
+                <label className="field">{t('publish.resolution')}
                   <select value={publishResolution} disabled={publishing} onChange={(e) => setPublishResolution(e.target.value as PublishResolutionKey)}>
-                    {PUBLISH_RESOLUTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                    {PUBLISH_RESOLUTIONS.map((item) => <option key={item.key} value={item.key}>{t(item.labelKey)}</option>)}
                   </select>
                 </label>
-                <label className="field">帧率
+                <label className="field">{t('publish.fps')}
                   <select value={publishFps} disabled={publishing} onChange={(e) => setPublishFps(Number(e.target.value))}>
                     {PUBLISH_FPS.map((value) => <option key={value} value={value}>{value} fps</option>)}
                   </select>
                 </label>
               </div>
-              <label className="field">直播标题（可选）
+              <label className="field">{t('publish.titleField')}
                 <input
                   value={publishTitle}
                   maxLength={120}
                   disabled={publishing}
-                  placeholder={`${username || '用户'}的直播`}
+                  placeholder={t('msg.userStreamTitle', { name: username || msg('common.userName') })}
                   onChange={(e) => setPublishTitle(e.target.value)}
                 />
               </label>
 
               <div className="cover-field">
                 <div className="cover-field-head">
-                  <span>直播封面（可选）</span>
-                  <small>选图后自动压缩到 2MB 以内的 JPEG dataURL，开播时上传</small>
+                  <span>{t('publish.coverTitle')}</span>
+                  <small>{t('publish.coverHint')}</small>
                 </div>
                 <div className="cover-picker">
                   <div className="cover-thumb" style={cover ? undefined : { background: 'linear-gradient(135deg,#1d2742,#121a2e)' }}>
                     {cover ? (
-                      <img src={cover.dataUrl} alt="封面预览" />
+                      <img src={cover.dataUrl} alt={t('publish.coverPreviewAlt')} />
                     ) : (
                       <span className="cover-thumb-empty" aria-hidden="true">＋</span>
                     )}
@@ -1359,32 +1440,32 @@ function App() {
                       disabled={coverBusy || publishing}
                       onClick={() => coverInput.current?.click()}
                     >
-                      {coverBusy ? '处理中…' : cover ? '更换图片' : '选择图片'}
+                      {coverBusy ? t('publish.coverBusy') : cover ? t('publish.coverChange') : t('publish.coverPick')}
                     </button>
                     {cover && (
                       <>
-                        <button type="button" className="ghost small" disabled={publishing} onClick={() => { setCover(null); setCoverError(''); }}>
-                          移除
+                        <button type="button" className="ghost small" disabled={publishing} onClick={() => { setCover(null); setCoverError(null); }}>
+                          {t('publish.coverRemove')}
                         </button>
                         <span className="hint">{describeCoverSize(cover)}</span>
                       </>
                     )}
                   </div>
                 </div>
-                {coverError && <p className="hint err-text" role="status">{coverError}</p>}
+                {coverError && <p className="hint err-text" role="status">{translateMessage(coverError)}</p>}
                 {!coverError && cover && cover.bytes <= MAX_COVER_BYTES && (
-                  <p className="hint">开播时会先创建直播间、上传封面，再开始推流；上传失败不会影响开播。</p>
+                  <p className="hint">{t('publish.coverUploadBeforeStart')}</p>
                 )}
                 {lastCreated && cover && (
                   <p className="hint">
-                    已创建直播间 #{lastCreated.id}
+                    {t('publish.lastCreatedRoom', { id: lastCreated.id })}
                     <button
                       type="button"
                       className="link-button"
                       disabled={coverBusy || publishing}
                       onClick={() => void uploadCoverToLastCreated()}
                     >
-                      上传封面到该直播间
+                      {t('publish.uploadCoverToRoom')}
                     </button>
                   </p>
                 )}
@@ -1398,45 +1479,43 @@ function App() {
                   onChange={(e) => togglePublishOverlay(e.target.checked)}
                 />
                 <span className="switch-text">
-                  叠加 Live2D 看板娘
+                  {t('publish.overlaySwitch')}
                   <small>
                     {live2dState.hasModel
-                      ? '开播时把摄像头/屏幕画面与模型画布合成，只替换视频轨，音频保留'
-                      : '尚未加载模型：开播将保持原始画面，可先到 Live2D 面板加载模型'}
+                      ? t('publish.overlaySwitchHintOn')
+                      : t('publish.overlaySwitchHintOff')}
                   </small>
                 </span>
               </label>
 
               <div className="publish-actions">
                 <button type="button" onClick={() => void startPublish()} disabled={!secureContext || publishing}>
-                  {publishing ? '推流中…' : '开始开播'}
+                  {publishing ? t('publish.starting') : t('publish.start')}
                 </button>
-                <button type="button" className="secondary" onClick={() => stopPublish()} disabled={!publishing}>停止推流</button>
-                <a className="button ghost small" href="#live2d">配置 Live2D</a>
+                <button type="button" className="secondary" onClick={() => stopPublish()} disabled={!publishing}>{t('publish.stop')}</button>
+                <a className="button ghost small" href="#live2d">{t('publish.configureLive2d')}</a>
               </div>
               {!secureContext && (
-                <p className="hint warn-text">
-                  浏览器推流需要 HTTPS：当前页面不是安全上下文（http://IP 访问），开播按钮已禁用；观看、WHEP 播放与弹幕不受影响，请改用 https:// 域名访问后开播。
-                </p>
+                <p className="hint warn-text">{t('publish.insecureHint')}</p>
               )}
-              <p className={`hint rtc-status ${publishStatus.tone}`} role="status" aria-live="polite">{publishStatus.text}</p>
-              <p className="hint">开播流程：创建直播间 → 上传封面（可选）→ 采集音视频 → 合成 Live2D（可选）→ WHIP 协商（SDP offer/answer）→ SRS 推流。</p>
+              <p className={`hint rtc-status ${publishStatus.tone}`} role="status" aria-live="polite">{translateMessage(publishStatus.text)}</p>
+              <p className="hint">{t('publish.flowHint')}</p>
             </div>
             <div className="publish-preview">
               <div className={`player preview ${publishing ? 'has-stream' : ''}`}>
-                <video ref={previewVideo} muted autoPlay playsInline aria-label="本地预览" />
+                <video ref={previewVideo} muted autoPlay playsInline aria-label={t('publish.previewLabel')} />
                 {!publishing && (
                   <div className="player-empty">
                     <span className="player-empty-icon" aria-hidden="true">◉</span>
-                    <p>本地预览</p>
+                    <p>{t('publish.previewLabel')}</p>
                   </div>
                 )}
               </div>
               <p className="hint">{publishing
-                ? '本地预览：只在本机显示；开启 Live2D 叠加后显示合成后的画面'
+                ? t('publish.previewHintLive')
                 : secureContext
-                  ? '本地预览：点击「开始开播」后显示画面'
-                  : '浏览器推流需要 HTTPS，无法获取本地预览'}</p>
+                  ? t('publish.previewHintIdle')
+                  : t('publish.previewHintInsecure')}</p>
             </div>
           </div>
         </section>
@@ -1445,23 +1524,23 @@ function App() {
           <section className="panel live2d-panel" id="live2d">
             <div className="panel-head">
               <div>
-                <span className="eyebrow">LIVE2D WIDGET</span>
-                <h2>Live2D 看板娘</h2>
-                <p className="hint">输入 Cubism 3/4/5 模型（.model3.json）地址加载，模型与 Cubism Core 都从网络加载，不内置任何模型。</p>
+                <span className="eyebrow">{t('live2d.eyebrow')}</span>
+                <h2>{t('live2d.title')}</h2>
+                <p className="hint">{t('live2d.panelHint')}</p>
               </div>
-              <span className={`state-pill ${live2dTone}`}>{live2dPhaseLabel(live2dState.phase)}</span>
+              <span className={`state-pill ${live2dTone}`}>{t(live2dPhaseLabel(live2dState.phase))}</span>
             </div>
             <div className="live2d-form">
               <input
                 value={live2dInput}
                 onChange={(e) => setLive2dInput(e.target.value)}
                 placeholder="https://example.com/model/model3.json"
-                aria-label="Live2D 模型地址"
+                aria-label={t('live2d.urlLabel')}
                 disabled={live2dLoading}
                 spellCheck={false}
               />
               <button type="button" onClick={() => void loadLive2DModel()} disabled={live2dLoading}>
-                {live2dLoading ? '加载中…' : '加载看板娘'}
+                {live2dLoading ? t('live2d.loadingButton') : t('live2d.loadButton')}
               </button>
               <button
                 type="button"
@@ -1469,7 +1548,7 @@ function App() {
                 onClick={toggleLive2DVisible}
                 disabled={!live2dState.hasModel}
               >
-                {live2dState.visible ? '隐藏' : '显示'}
+                {live2dState.visible ? t('live2d.hide') : t('live2d.show')}
               </button>
               <button
                 type="button"
@@ -1477,35 +1556,35 @@ function App() {
                 onClick={() => unloadLive2D()}
                 disabled={!live2dState.hasModel}
               >
-                卸载
+                {t('live2d.unload')}
               </button>
             </div>
-            <p className={`hint rtc-status ${live2dTone}`} role="status" aria-live="polite">{live2dState.message}</p>
+            <p className={`hint rtc-status ${live2dTone}`} role="status" aria-live="polite">{translateMessage(live2dState.message)}</p>
             <div className="live2d-stage-wrap">
               <div ref={live2dHost} className={`live2d-stage ${live2dState.visible ? '' : 'is-hidden'}`} />
               {!live2dState.hasModel && (
                 <div className="live2d-placeholder" aria-hidden="true">
                   <span className="live2d-placeholder-mark" aria-hidden="true">L2D</span>
-                  <p>还没有加载看板娘</p>
-                  <small>支持 .model3.json；加载失败会在这里提示原因</small>
+                  <p>{t('live2d.placeholderTitle')}</p>
+                  <small>{t('live2d.placeholderHint')}</small>
                 </div>
               )}
             </div>
-            <p className="hint">提示：模型服务器需要允许跨域（CORS）；开播时可在「浏览器开播」卡片勾选「叠加 Live2D 看板娘」把模型合成进直播画面。</p>
+            <p className="hint">{t('live2d.footerHint')}</p>
           </section>
 
           <section className="panel chat-panel" id="chat">
             <div className="panel-head">
               <div>
-                <span className="eyebrow">LIVE CHAT</span>
-                <h2>实时弹幕评论</h2>
-                <p className="hint">{selected ? `当前房间：${selected.title} · ` : ''}{chatState}</p>
+                <span className="eyebrow">{t('chat.eyebrow')}</span>
+                <h2>{t('chat.title')}</h2>
+                <p className="hint">{selected ? translateMessage(msg('chat.currentRoom', { title: selected.title })) : ''}{translateMessage(chatState)}</p>
               </div>
-              {chatStreamId && <button type="button" className="secondary small" onClick={leaveRoom}>离开房间</button>}
+              {chatStreamId && <button type="button" className="secondary small" onClick={leaveRoom}>{t('chat.leave')}</button>}
             </div>
             <div className="chat-messages">
               {chatMessages.length === 0
-                ? <p className="hint">还没有评论，加入直播间后即可参与互动。</p>
+                ? <p className="hint">{t('chat.empty')}</p>
                 : chatMessages.map((m, i) => (
                   <div className="chat-line" key={`${m.id}-${i}`}>
                     <b>{m.username}</b>
@@ -1520,18 +1599,18 @@ function App() {
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 maxLength={500}
-                placeholder={token ? '输入弹幕评论，最多 500 字' : '登录后加入直播间发送弹幕'}
+                placeholder={token ? t('chat.inputPlaceholder') : t('chat.inputPlaceholderSignedOut')}
                 disabled={!token || !chatStreamId}
               />
-              <button disabled={!token || !chatStreamId}>发送</button>
+              <button disabled={!token || !chatStreamId}>{t('chat.send')}</button>
             </form>
           </section>
         </div>
 
         <footer className="footer">
-          <span>葱直播 CongLive</span>
-          <span>WebRTC · WHIP · WHEP · Live2D</span>
-          <span>请勿直播未经授权的私人内容</span>
+          <span>{t('footer.brand')}</span>
+          <span>{t('footer.tech')}</span>
+          <span>{t('footer.notice')}</span>
         </footer>
       </main>
     </div>
