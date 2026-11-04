@@ -129,6 +129,10 @@ docs/             README 截图等
 
 使用前请阅读 [DISCLAIMER.md](DISCLAIMER.md)：本项目仅供技术学习/自建演示，不构成法律意见，不提供内容审核、备案或授权。第三方组件许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，工程检查记录见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)。
 
+## 品牌与文案
+
+品牌 Slogan、短视频旁白和社交文案见 [docs/BRAND.md](docs/BRAND.md)。
+
 ## 安全
 
 请阅读 [SECURITY.md](SECURITY.md)。不要在公开 Issue 中贴密钥、管理员密码或服务器凭据。

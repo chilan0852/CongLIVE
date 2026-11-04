@@ -129,6 +129,10 @@ docs/             README screenshots and notes
 
 Read [DISCLAIMER.en.md](DISCLAIMER.en.md): this project is for technical study and self-hosted demos, **not legal advice**, and provides no content moderation, filing or licensing. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/COMPLIANCE.en.md](docs/COMPLIANCE.en.md).
 
+## Brand & copy
+
+Taglines, voiceover and social copy: [docs/BRAND.md](docs/BRAND.md).
+
 ## Security
 
 Read [SECURITY.md](SECURITY.md). Never paste secrets, admin passwords or server credentials into a public issue.
