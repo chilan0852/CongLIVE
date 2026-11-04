@@ -1,0 +1,7 @@
+{
+  "id": "stream-audit",
+  "name": "直播事件记录",
+  "version": "1.0.0",
+  "description": "记录直播创建、开始推流和结束推流事件到服务器本地 JSONL 文件。",
+  "entry": "index.js"
+}

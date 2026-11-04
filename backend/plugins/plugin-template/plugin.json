@@ -1,0 +1,7 @@
+{
+  "id": "plugin-template",
+  "name": "插件开发模板",
+  "version": "1.0.0",
+  "description": "复制此目录并修改 ID，即可创建自己的插件。默认不启用。",
+  "entry": "index.js"
+}

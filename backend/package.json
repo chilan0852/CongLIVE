@@ -1,0 +1,20 @@
+{
+  "name": "conglive-backend",
+  "version": "0.7.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --check src/index.js && node --check src/plugin-manager.js && node --check src/mysql-utils.js && node --check src/covers-utils.js && node --test"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.12.0",
+    "ws": "^8.18.0"
+  }
+}

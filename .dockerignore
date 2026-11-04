@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/.gradle
+**/.idea
+**/build
+**/dist
+**/.env
+server/recordings/**
+server/plugin-data/**
+server/srs-html/**
+*.zip
+*.apk

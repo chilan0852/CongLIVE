@@ -1,0 +1,17 @@
+.env
+srs.runtime.conf
+recordings/**
+!recordings/.gitkeep
+plugin-data/**
+!plugin-data/.gitkeep
+covers/**
+!covers/.gitkeep
+
+srs-html/**
+!srs-html/.gitkeep
+!srs-html/live/
+!srs-html/live/.gitkeep
+!srs-html/recordings/
+!srs-html/recordings/.gitkeep
+certs
+private-model/

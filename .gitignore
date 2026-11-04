@@ -1,0 +1,37 @@
+# dependencies / builds
+node_modules/
+dist/
+build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.class
+*.jar
+
+# secrets & deployment state
+.env
+.env.*
+!.env.example
+server/srs.runtime.conf
+server/certs/
+server/private-model/
+server/covers/
+server/recordings/
+server/srs-html/
+server/plugin-data/
+server/data/
+backend/data/
+
+# logs / OS / editors
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# promo render artifacts
+promo/out/
+promo/frames/

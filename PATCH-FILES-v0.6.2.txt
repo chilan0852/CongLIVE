@@ -1,0 +1,18 @@
+本次修复需同步的文件：
+
+服务端：
+- server/srs.conf
+- backend/src/index.js
+- server/install.sh
+- server/fix-live-status.sh
+
+Android：
+- android/app/src/main/java/com/conglive/app/MainActivity.kt
+- android/app/build.gradle.kts
+
+已有 VPS 可在更新上述服务端文件后执行：
+  cd CongLive/server
+  chmod +x fix-live-status.sh
+  ./fix-live-status.sh
+
+Android 请重新构建并安装 versionName 0.6.2 的客户端。

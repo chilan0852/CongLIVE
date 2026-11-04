@@ -1,0 +1,11 @@
+{$DOMAIN} {
+  encode zstd gzip
+
+  redir /admin/ /admin 308
+
+  @backend path /api/* /ws/* /admin* /covers/*
+  reverse_proxy @backend backend:3000
+
+
+  reverse_proxy web:80
+}

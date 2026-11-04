@@ -1,0 +1,12 @@
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#7657ff</item>
+        <!-- v0.7.6: dark gradient shell, avoid a white launch flash. -->
+        <item name="android:windowBackground">#060A14</item>
+        <item name="android:statusBarColor">#060A14</item>
+        <item name="android:navigationBarColor">#060A14</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

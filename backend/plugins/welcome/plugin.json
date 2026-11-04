@@ -1,0 +1,7 @@
+{
+  "id": "welcome",
+  "name": "欢迎扩展示例",
+  "version": "1.0.0",
+  "description": "演示如何给葱直播 API 增加一个插件路由。",
+  "entry": "index.js"
+}
