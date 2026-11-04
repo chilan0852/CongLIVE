@@ -98,6 +98,13 @@ test('TURN host normalisation handles domains, ports, protocols and IPv6', () =>
     'stun:relay.example.com:3478',
   ]);
   assert.deepEqual(buildTurnUrls({ host: '', urls: '' }), []);
+  assert.deepEqual(buildTurnUrls({ host: 'xinglan.work', tls: true, tlsPort: 5349 }), [
+    'turn:xinglan.work:3478?transport=udp',
+    'turn:xinglan.work:3478?transport=tcp',
+    'turns:xinglan.work:5349?transport=tcp',
+    'stun:xinglan.work:3478',
+  ]);
+  assert.ok(buildTurnUrls({ host: 'xinglan.work', tls: 'on', tlsPort: 9999 }).includes('turns:xinglan.work:9999?transport=tcp'));
 });
 
 test('turnSettingsFromEnv resolves secret, urls and ttl', () => {

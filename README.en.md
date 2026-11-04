@@ -115,6 +115,13 @@ Plugins live in `backend/plugins/`, loaded by `backend/src/plugin-manager.js`. T
 - Browser publishing can composite the model into the WHIP stream via a canvas pipeline.
 - Android currently shows Live2D as an in-app mascot (WebView) and does not composite it into WebRTC publishing.
 
+## TURN relay
+
+- coturn is included in `server/docker-compose.yml`; the installer generates `TURN_SECRET`/`turn.runtime.conf` and opens **3478 TCP/UDP**, **5349 TCP/UDP** and **49160-49200 UDP**.
+- `GET /api/turn-credentials` (authenticated) returns one-hour HMAC credentials; Web/PC voice rooms use TURN automatically and fall back to STUN with a visible status when unavailable.
+- After HTTPS is issued, run `server/sync-turn-cert.sh` to copy Caddy's certificate into coturn and enable **turns:domain:5349?transport=tcp** (`TURN_TLS=1`). Re-run after certificate renewal, or add a daily cron.
+- Open the same ports in your cloud firewall. `turn.runtime.conf` and `turn-certs/` are gitignored.
+
 ## Configuration
 
 See `server/.env.example` and `backend/.env.example`. **Never commit `.env`, `server/srs.runtime.conf`, private keys or recordings** — they are excluded by `.gitignore`.

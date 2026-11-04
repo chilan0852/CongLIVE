@@ -176,6 +176,8 @@ if command -v ufw >/dev/null 2>&1; then
   # TURN 中继：coturn 以 host network 直接绑定 3478 与 relay 端口段。
   ufw allow 3478/tcp >/dev/null || true
   ufw allow 3478/udp >/dev/null || true
+  ufw allow 5349/tcp >/dev/null || true
+  ufw allow 5349/udp >/dev/null || true
   ufw allow 49160:49200/udp >/dev/null || true
   if [[ -n "$DOMAIN" ]]; then
     ufw allow 80/tcp >/dev/null || true
@@ -244,3 +246,9 @@ fi
 printf '插件列表： %s/api/plugins\n' "$(if [[ -n "$DOMAIN" ]]; then printf 'https://%s' "$DOMAIN"; else printf 'http://%s:3000' "$PUBLIC_HOST"; fi)"
 printf 'TURN 凭据接口：%s/api/turn-credentials（Bearer 登录，默认 ttl 3600 秒）\n' "$(if [[ -n "$DOMAIN" ]]; then printf 'https://%s' "$DOMAIN"; else printf 'http://%s:3000' "$PUBLIC_HOST"; fi)"
 printf '\n常用命令：\n  cd %s/server\n  docker compose ps\n  docker compose logs -f backend srs\n  docker compose restart backend\n\n' "$PROJECT_DIR"
+
+# Best-effort TURN TLS certificate sync (Caddy may need a few seconds).
+if [[ -n "$DOMAIN" ]]; then
+  sleep 3
+  bash "$SCRIPT_DIR/sync-turn-cert.sh" || warn "TURN TLS 证书同步失败；可稍后运行 server/sync-turn-cert.sh"
+fi

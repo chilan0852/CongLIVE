@@ -66,7 +66,7 @@ export function normalizeTurnHost(raw) {
  * entries are derived from the public host so the same value is used for the
  * UDP relay, the TCP fallback and STUN.
  */
-export function buildTurnUrls({ urls, host, port = DEFAULT_TURN_PORT } = {}) {
+export function buildTurnUrls({ urls, host, port = DEFAULT_TURN_PORT, tls = false, tlsPort = 5349 } = {}) {
   const configured = normalizeTurnUrls(urls);
   if (configured.length) return configured;
   const hostname = normalizeTurnHost(host);
@@ -76,11 +76,23 @@ export function buildTurnUrls({ urls, host, port = DEFAULT_TURN_PORT } = {}) {
   // A host that already carries a port (e.g. PUBLIC_HOST=example.com:3478) is
   // used verbatim instead of producing host:port:port.
   const base = HOST_WITH_PORT.test(hostname) ? hostname : `${hostname}:${portValue}`;
-  return [
+  const result = [
     `turn:${base}?transport=udp`,
     `turn:${base}?transport=tcp`,
-    `stun:${base}`,
   ];
+  // TURN over TLS protects credentials/media control on networks that only
+  // allow TLS (typically 443/5349). Only advertise it when the deployment has
+  // a valid certificate and enables TURN_TLS; otherwise coturn has no cert.
+  const tlsEnabled = tls === true || /^(1|on|true|yes)$/i.test(String(tls ?? ''));
+  if (tlsEnabled) {
+    const tlsPortValue = Math.trunc(toNumber(tlsPort, 5349));
+    const tlsBase = HOST_WITH_PORT.test(hostname)
+      ? hostname
+      : `${hostname}:${tlsPortValue >= 1 && tlsPortValue <= 65535 ? tlsPortValue : 5349}`;
+    result.push(`turns:${tlsBase}?transport=tcp`);
+  }
+  result.push(`stun:${base}`);
+  return result;
 }
 
 /** Build a short-lived coturn REST credential pair. */
@@ -111,6 +123,8 @@ export function turnSettingsFromEnv(env = process.env) {
     urls: env.TURN_URLS,
     host: env.TURN_HOST || env.TURN_DOMAIN || env.PUBLIC_HOST || '127.0.0.1',
     port: env.TURN_PORT || DEFAULT_TURN_PORT,
+    tls: env.TURN_TLS,
+    tlsPort: env.TURN_TLS_PORT || 5349,
   });
   return { secret, urls, ttl: clampTurnTtl(env.TURN_TTL) };
 }

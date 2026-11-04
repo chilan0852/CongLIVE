@@ -115,6 +115,13 @@ APK 输出：`android/app/build/outputs/apk/debug/app-debug.apk`。App 内「我
 - 浏览器开播可勾选「叠加 Live2D」，模型经 canvas 合成进推流画面。
 - Android 当前仅做界面看板娘（WebView），不把模型合成进 WebRTC 推流。
 
+## TURN 中继
+
+- `server/docker-compose.yml` 内置 coturn；安装器生成 `TURN_SECRET`/`turn.runtime.conf`，并放行 **3478 TCP/UDP**、**5349 TCP/UDP** 与 **49160-49200 UDP**。
+- `GET /api/turn-credentials` 需登录，返回 1 小时 HMAC 临时凭据；网页/PC 语音房自动使用 TURN，接口不可用时回退 STUN 并在界面提示。
+- HTTPS 域名部署后运行 `server/sync-turn-cert.sh`：从 Caddy 复制证书到 coturn，开启 **turns:域名:5349?transport=tcp**，并把 `TURN_TLS=1` 写入 `.env`。证书续期后需重新运行（或加入每日 cron）。
+- 云防火墙也需放行上述端口；`turn.runtime.conf`、`turn-certs/` 已被 `.gitignore` 排除。
+
 ## 配置
 
 主要环境变量见 `server/.env.example`、`backend/.env.example`。**不要提交 `.env`、`server/srs.runtime.conf`、证书私钥或录像文件**；这些已在 `.gitignore` 中排除。
