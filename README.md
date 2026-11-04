@@ -117,6 +117,10 @@ docs/             README 截图等
 - 浏览器推流需要 HTTPS 安全上下文；HTTP + IP 仅适合观看。
 - 同一账号/房间的并发、分布式部署与水平扩展尚未实现。
 
+## 法律与合规
+
+使用前请阅读 [DISCLAIMER.md](DISCLAIMER.md)：本项目仅供技术学习/自建演示，不构成法律意见，不提供内容审核、备案或授权。第三方组件许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，工程检查记录见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)。
+
 ## 安全
 
 请阅读 [SECURITY.md](SECURITY.md)。不要在公开 Issue 中贴密钥、管理员密码或服务器凭据。
