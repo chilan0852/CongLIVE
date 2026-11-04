@@ -83,7 +83,7 @@ APK output: `android/app/build/outputs/apk/debug/app-debug.apk`. In the app, ope
 ### Android APK download
 
 - [Latest release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.7.6` debug-signed APK: `com.conglive.app` / versionCode 18 / minSdk 29 / targetSdk 34
+- `v0.7.7` Chinese/English APK: `com.conglive.app` / versionCode 19 / minSdk 29 / targetSdk 34
 - No Live2D models are bundled; the APK is for testing.
 
 ## Plugin extensions
