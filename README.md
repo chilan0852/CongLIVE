@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-8b6cff.svg)](LICENSE)
 [![WebRTC](https://img.shields.io/badge/WebRTC-WHIP%20%2F%20WHEP-57d9ff.svg)](https://webrtc.org/)
-[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2ea44f.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/chilan0852/CongLIVE/actions/workflows/ci.yml/badge.svg)](https://github.com/chilan0852/CongLIVE/actions/workflows/ci.yml)
 
 ![Web 用户端](docs/screenshots/web-home.jpg)
 
@@ -42,7 +42,7 @@ Web / Android ── WebSocket：实时弹幕
 要求：Linux（Ubuntu 22.04/24.04 或 Debian 12）、Docker + Compose、域名（推荐，用于自动 HTTPS）。
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/chilan0852/CongLIVE.git
 cd CongLive
 sudo DOMAIN=live.example.com bash server/install.sh
 ```
