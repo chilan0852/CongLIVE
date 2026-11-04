@@ -14,6 +14,8 @@
 
 - **Android publishing**: native Kotlin app with Camera2 (Camera1 fallback) and screen capture, WHIP publishing, WHEP playback, camera switching, local preview, resolution/FPS controls and MP4 recording playback.
 - **Browser publishing**: React + TypeScript; `getUserMedia` / `getDisplayMedia` → WHIP, quality controls and live preview.
+- **Windows portable client**: an Electron-packaged `CongLive.exe` with configurable server domain/IP, camera, microphone, screen sharing and a PC layout.
+- **Studio + voice room**: a four-step `/studio` (camera/screen, mic level, Live2D overlay, cover/quality) and full-duplex WebRTC mesh voice inside rooms.
 - **Standalone room page**: click a live cover in the lobby to open `/room/<id>` with player, chat, viewer count and live latency.
 - **Live metrics**: WHEP `getStats` latency monitoring and SRS viewer counts; the lobby shows viewer counts.
 - **Capacity-gated 1080p60**: 1080p/60fps is offered only when `/api/capacity` reports enough server resources; the 2C2G reference server disables it.
@@ -116,6 +118,7 @@ See `server/.env.example` and `backend/.env.example`. **Never commit `.env`, `se
 android/          Kotlin client: capture, WHIP/WHEP, preview, covers, Live2D
 web/              React client: directory, WHEP, browser WHIP, covers, Live2D
 webui/            admin.html dashboard
+pc/               Windows Electron portable client
 backend/          Express API, auth proxy, SRS hooks, plugins, tests
 server/           Compose, SRS, Caddy, install.sh
 docs/             README screenshots and notes

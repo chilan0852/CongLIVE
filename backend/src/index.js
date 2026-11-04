@@ -16,6 +16,7 @@ import { recordingApiBaseForRequest, recordingBelongsToStreams } from './recordi
 import { CoverValidationError, coverFilenameFromUrl, saveCoverImage } from './covers-utils.js';
 import { createCapacityProvider } from './capacity.js';
 import { createViewerRegistry } from './viewers.js';
+import { createVoiceSignaling, handleVoiceMessage, VOICE_LIMITS } from './voice.js';
 
 dotenv.config();
 
@@ -538,16 +539,22 @@ app.patch('/api/streams/:id/status', auth, (_req, res) => {
   return res.status(405).json({ error: '直播状态由推流服务器自动维护，客户端不能直接修改' });
 });
 
-// Real-time chat: the browser authenticates in the first WebSocket message so
-// JWTs are not placed in URLs, access logs, or browser history.
+// Real-time chat and room voice signaling: the browser authenticates in the
+// first WebSocket message so JWTs are not placed in URLs, access logs, or
+// browser history.
 const httpServer = createServer(app);
-const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
+// Voice SDP frames are larger than chat frames; chat content is still trimmed
+// to 500 chars below, so the bigger frame budget does not change chat.
+const wss = new WebSocketServer({ noServer: true, maxPayload: VOICE_LIMITS.maxFrameBytes });
 const chatRooms = new Map();
 const lastChatAt = new Map();
+// Server-side voice participants per room. Signaling only: the mesh carries media.
+const voiceSignaling = createVoiceSignaling();
 const sendWs = (ws, payload) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload)); };
 function closeChatRoom(streamId, reason = '直播间已关闭') {
   const room = chatRooms.get(String(streamId));
   if (!room) return;
+  voiceSignaling.clearRoom(streamId, reason);
   for (const ws of room) ws.close(4403, reason);
   chatRooms.delete(String(streamId));
 }
@@ -594,6 +601,9 @@ wss.on('connection', (ws) => {
         broadcastViewers(streamId, viewers);
         return;
       }
+      // Voice signaling is handled before chat so chat message handling (and
+      // its format) stays exactly as before.
+      if (handleVoiceMessage(voiceSignaling, ws, session, message)) return;
       if (message.type !== 'chat' || typeof message.content !== 'string') return;
       const content = message.content.trim().slice(0, 500);
       if (!content) return;
@@ -616,6 +626,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     clearTimeout(authTimer);
     if (!session) return;
+    // A closed connection leaves the voice room too and notifies the mesh.
+    voiceSignaling.leave(ws, 'close');
     const room = chatRooms.get(String(session.streamId));
     room?.delete(ws);
     if (room && room.size === 0) chatRooms.delete(String(session.streamId));

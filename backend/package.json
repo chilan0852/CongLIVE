@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --check src/index.js && node --check src/plugin-manager.js && node --check src/mysql-utils.js && node --check src/covers-utils.js && node --check src/capacity.js && node --check src/viewers.js && node --test"
+    "test": "node --check src/index.js && node --check src/plugin-manager.js && node --check src/mysql-utils.js && node --check src/covers-utils.js && node --check src/capacity.js && node --check src/viewers.js && node --check src/voice.js && node --test"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

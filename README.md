@@ -14,7 +14,9 @@
 
 - **Android 开播**：Kotlin 原生，Camera2（Camera1 回退）/ 屏幕共享，WHIP 推流、WHEP 观看、前后摄切换、本地预览、分辨率/帧率选择、MP4 录像回放。
 - **浏览器开播**：React + TypeScript，`getUserMedia` / `getDisplayMedia` → WHIP，分辨率/帧率选择，实时预览。
+- **Windows 便携客户端**：Electron 打包的 `CongLive.exe`，可配置任意服务器域名/IP，支持摄像头、麦克风、屏幕共享和 PC 宽屏布局。
 - **独立直播间页面**：大厅点击正在直播的封面进入 `/room/<id>`，含播放器、弹幕、观看人数与实时延迟。
+- **开播工作台 + 语音房**：`/studio` 四步开播（摄像头/屏幕、麦克风电平、Live2D 叠加、封面/画质）；房间内支持 WebRTC mesh 全双工语音。
 - **实时指标**：WHEP `getStats` 延迟监控、SRS 观看人数统计；大厅卡片直接显示人数。
 - **1080p60 条件开启**：1080p/60fps 仅在 `/api/capacity` 判断服务器资源足够时开放，2C2G 默认禁用。
 - **Web 观看**：WHEP 低延迟播放、直播大厅、登录注册、实时弹幕。
@@ -116,6 +118,7 @@ APK 输出：`android/app/build/outputs/apk/debug/app-debug.apk`。App 内「我
 android/          Kotlin 客户端：采集、WHIP/WHEP、预览、封面、Live2D 入口
 web/              React 用户端：大厅、WHEP、浏览器 WHIP、封面、Live2D
 webui/            admin.html 管理后台
+pc/               Windows Electron portable client
 backend/          Express API、鉴权代理、SRS hooks、插件、测试
 server/           Compose、SRS、Caddy、install.sh
 docs/             README 截图等

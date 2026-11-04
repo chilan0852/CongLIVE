@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>葱直播 CongLive</title>
+  <link rel="stylesheet" href="launcher.css" />
+</head>
+<body>
+  <main class="launcher">
+    <header class="brand">
+      <img class="brand-logo" src="assets/icon.png" alt="" width="56" height="56" />
+      <div class="brand-copy">
+        <h1 data-i18n="appName">葱直播 CongLive</h1>
+        <p data-i18n="appSub">Windows 便携客户端</p>
+      </div>
+      <div class="lang-switch" role="group" aria-label="Language / 语言">
+        <button type="button" data-lang="zh">中文</button>
+        <button type="button" data-lang="en">English</button>
+      </div>
+    </header>
+
+    <section class="card" aria-labelledby="server-title">
+      <h2 id="server-title" data-i18n="serverTitle">服务器地址</h2>
+      <p class="hint" data-i18n="serverHint">支持域名、IP 或完整 http(s) 地址；留空时使用默认服务器。</p>
+
+      <form id="server-form" novalidate>
+        <label class="field" for="server-input">
+          <span data-i18n="serverLabel">直播服务器</span>
+          <input
+            id="server-input"
+            name="server"
+            type="url"
+            inputmode="url"
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            placeholder="https://xinglan.work"
+          />
+        </label>
+        <p id="preview" class="preview" aria-live="polite"></p>
+        <p id="error" class="error" role="alert" hidden></p>
+        <div class="actions">
+          <button id="connect" class="primary" type="submit" data-i18n="connect">进入直播</button>
+          <button id="reset" class="secondary" type="button" data-i18n="reset">恢复默认</button>
+        </div>
+      </form>
+
+      <ul class="tips">
+        <li data-i18n="tipNormalize">输入 <code>xinglan.work</code> 会自动补全为 https；局域网 IP 默认使用 http。</li>
+        <li data-i18n="tipSettings">进入后可在「文件 → 服务器设置」中随时修改，配置保存在本机。</li>
+        <li data-i18n="tipPermissions">摄像头、麦克风与屏幕共享在进入后按网页提示授权。</li>
+      </ul>
+
+      <p class="current" id="current" hidden></p>
+    </section>
+
+    <footer class="footer">
+      <span id="footer-version">v-</span>
+      <span class="dot" aria-hidden="true">·</span>
+      <span data-i18n="footerHint">当前地址会保存到本机，下次启动直接进入直播。</span>
+    </footer>
+  </main>
+  <script src="launcher.js"></script>
+</body>
+</html>

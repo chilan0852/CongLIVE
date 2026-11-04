@@ -1,13 +1,16 @@
 {
   "name": "conglive-web",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e": "node e2e/studio-voice.mjs",
+    "e2e:real": "node e2e/real-whep.mjs",
+    "e2e:backend-voice": "node e2e/backend-voice.mjs"
   },
   "dependencies": {
     "pixi-live2d-display": "^0.4.0",

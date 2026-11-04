@@ -30,7 +30,16 @@ import {
   unloadLive2D,
   useLive2DState,
 } from './live2d';
-import { createOverlayStream, type OverlayHandle } from './overlay';
+import {
+  PUBLISH_FPS,
+  PUBLISH_RESOLUTIONS,
+  describeWhepFailure,
+  looksLikeSdp,
+  waitForIceGathering,
+  type PublishResolutionKey,
+  type PublishSource,
+  type VideoElementWithFrames,
+} from './media';
 import {
   API,
   coverFallbackChar,
@@ -47,201 +56,12 @@ import {
   type RtcTone,
 } from './api';
 import { startLatencyMonitor, type LatencySample } from './latency';
-import { navigate, roomPath, scrollToSection, useRoute } from './router';
+import { navigate, roomPath, scrollToSection, studioPath, useRoute } from './router';
 import { RoomPage } from './room';
+import { StudioPage, type StudioStartRequest } from './studio';
+import { WhipPublisher, type WhipCreatedInfo } from './whipPublisher';
 
 type LastCreatedStream = { id: number; title: string; coverUrl: string | null };
-type VideoElementWithFrames = HTMLVideoElement & {
-  requestVideoFrameCallback?: (callback: () => void) => number;
-  cancelVideoFrameCallback?: (handle: number) => void;
-};
-
-/**
- * Wait until ICE gathering completes so the offer posted to WHEP already contains
- * the client candidates (SRS needs them to trickle/answer within one request).
- * Resolves early with 'timeout' when gathering stalls, and with 'aborted' when the
- * viewer leaves the room, so the caller can stop without sending a stale offer.
- */
-function waitForIceGathering(
-  pc: RTCPeerConnection,
-  signal?: AbortSignal,
-  timeoutMs = 12000,
-): Promise<'complete' | 'timeout' | 'aborted'> {
-  if (signal?.aborted) return Promise.resolve('aborted');
-  if (pc.iceGatheringState === 'complete') return Promise.resolve('complete');
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (reason: 'complete' | 'timeout' | 'aborted') => {
-      if (settled) return;
-      settled = true;
-      pc.removeEventListener('icegatheringstatechange', check);
-      signal?.removeEventListener('abort', onAbort);
-      window.clearTimeout(timer);
-      resolve(reason);
-    };
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') finish('complete');
-    };
-    const onAbort = () => finish('aborted');
-    const timer = window.setTimeout(() => finish('timeout'), timeoutMs);
-    signal?.addEventListener('abort', onAbort, { once: true });
-    pc.addEventListener('icegatheringstatechange', check);
-  });
-}
-
-/** An SDP answer must start with the version line and contain at least one media section. */
-function looksLikeSdp(text: string): boolean {
-  const value = text.trim();
-  return value.startsWith('v=0') && /^m=/m.test(value);
-}
-
-/** Extract a short JSON/plain-text error detail from a non-2xx media response. */
-function mediaErrorDetail(body: string): string {
-  let detail = '';
-  try {
-    const data = JSON.parse(body);
-    if (typeof data?.error === 'string') detail = data.error;
-    else if (typeof data?.detail === 'string') detail = data.detail;
-  } catch {
-    // Not JSON: nginx/gateway HTML or plain text, trimmed below.
-  }
-  if (!detail && body.trim() && !body.trim().startsWith('v=')) {
-    detail = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
-  }
-  return detail;
-}
-
-const WHEP_HINT_KEYS: Record<number, I18nKey> = {
-  400: 'whep.hint.400',
-  401: 'whep.hint.401',
-  403: 'whep.hint.403',
-  404: 'whep.hint.404',
-  409: 'whep.hint.409',
-  429: 'whep.hint.429',
-  502: 'whep.hint.502',
-  504: 'whep.hint.504',
-};
-
-/** Turn a non-2xx WHEP response into a short, human readable status message. */
-function describeWhepFailure(status: number, body: string): LocalizedError {
-  const detail = mediaErrorDetail(body);
-  return new LocalizedError(msg('whep.fail', {
-    status,
-    detail: detail ? backendText(detail, status) : msg(WHEP_HINT_KEYS[status] ?? 'whep.hint.generic'),
-  }));
-}
-
-type PublishSource = 'camera' | 'screen';
-// 1080p/60fps is offered only when GET /api/capacity reports allow1080p60=true.
-// The existing presets stay unchanged so low-end servers keep the old behavior.
-const PUBLISH_RESOLUTIONS = [
-  { key: '1080p', width: 1920, height: 1080, labelKey: 'publish.res1080p' },
-  { key: '720p', width: 1280, height: 720, labelKey: 'publish.res720p' },
-  { key: '540p', width: 960, height: 540, labelKey: 'publish.res540p' },
-  { key: '360p', width: 640, height: 360, labelKey: 'publish.res360p' },
-] as const;
-type PublishResolutionKey = (typeof PUBLISH_RESOLUTIONS)[number]['key'];
-const PUBLISH_FPS = [60, 30, 24, 15] as const;
-const PUBLISH_MEDIA_ERRORS = ['NotAllowedError', 'NotFoundError', 'NotReadableError', 'OverconstrainedError', 'NotSupportedError', 'SecurityError'];
-
-/** One active browser-publish session; null when nothing is being published. */
-type Publisher = {
-  controller: AbortController;
-  stream: MediaStream | null;
-  pc: RTCPeerConnection | null;
-  /** Frame rate requested for the publish session (used by the overlay). */
-  fps: number;
-  /** Raw camera/screen video track, restored when the overlay is switched off. */
-  originalVideoTrack: MediaStreamTrack | null;
-  /** Composite camera + Live2D canvas stream; null when overlay is off. */
-  composite: OverlayHandle | null;
-  /** Hidden <video> element that feeds the compositor. */
-  sourceVideo: HTMLVideoElement | null;
-};
-
-const WHIP_HINT_KEYS: Record<number, I18nKey> = {
-  400: 'whip.hint.400',
-  401: 'whip.hint.401',
-  403: 'whip.hint.403',
-  404: 'whip.hint.404',
-  409: 'whip.hint.409',
-  429: 'whip.hint.429',
-  502: 'whip.hint.502',
-  504: 'whip.hint.504',
-};
-
-/** Turn a non-2xx WHIP response into a short, human readable publish error. */
-function describeWhipFailure(status: number, body: string): LocalizedError {
-  const detail = mediaErrorDetail(body);
-  return new LocalizedError(msg('whip.fail', {
-    status,
-    detail: detail ? backendText(detail, status) : msg(WHIP_HINT_KEYS[status] ?? 'whip.hint.generic'),
-  }));
-}
-
-/** User-visible label for the selected publish source. */
-function sourceText(source: PublishSource): TextMessage {
-  return msg(source === 'screen' ? 'msg.sourceScreenShare' : 'msg.sourceCameraMic');
-}
-
-/** Explain getUserMedia/getDisplayMedia failures instead of leaking DOMException names. */
-function describeMediaFailure(error: any, source: PublishSource): TextMessage {
-  const name = String(error?.name || '');
-  const detail: TextMessage = error?.message ? rawText(String(error.message)) : msg('common.unknownError');
-  if (source === 'screen') {
-    switch (name) {
-      case 'NotAllowedError':
-      case 'SecurityError':
-        return msg('media.screenCancelled');
-      case 'NotSupportedError':
-        return msg('media.screenUnsupported');
-      default:
-        return msg('media.screenFailed', { detail });
-    }
-  }
-  switch (name) {
-    case 'NotAllowedError':
-    case 'SecurityError':
-      return msg('media.permissionDenied');
-    case 'NotFoundError':
-    case 'OverconstrainedError':
-      return msg('media.deviceNotFound');
-    case 'NotReadableError':
-      return msg('media.deviceBusy');
-    case 'NotSupportedError':
-      return msg('media.captureUnsupported');
-    default:
-      return msg('media.captureFailed', { detail });
-  }
-}
-
-/** Stop every track in a local capture stream; safe to call more than once. */
-function stopCaptureTracks(stream: MediaStream | null) {
-  if (!stream) return;
-  for (const track of stream.getTracks()) {
-    try { track.stop(); } catch { /* track already stopped */ }
-  }
-}
-
-/**
- * Ask the browser to prefer H.264 for outgoing video. SRS forwards the publisher's
- * H.264 to WHEP viewers, so keeping it first avoids a codec mismatch on older SRS boxes.
- * Browsers that do not expose the API keep their own defaults.
- */
-function preferH264(pc: RTCPeerConnection) {
-  const capabilities = typeof RTCRtpSender.getCapabilities === 'function'
-    ? RTCRtpSender.getCapabilities('video')
-    : null;
-  if (!capabilities?.codecs.length) return;
-  const h264 = capabilities.codecs.filter((codec) => /^video\/h264$/i.test(codec.mimeType));
-  if (!h264.length) return;
-  const ordered = [...h264, ...capabilities.codecs.filter((codec) => !h264.includes(codec))];
-  for (const transceiver of pc.getTransceivers()) {
-    const kind = transceiver.sender.track?.kind ?? transceiver.receiver.track?.kind;
-    if (kind !== 'video') continue;
-    try { transceiver.setCodecPreferences(ordered); } catch { /* keep browser defaults */ }
-  }
-}
 
 function live2dPhaseLabel(phase: string): I18nKey {
   switch (phase) {
@@ -257,6 +77,7 @@ function App() {
   const route = useRoute();
   const roomId = route.name === 'room' ? route.streamId : null;
   const inRoom = roomId !== null;
+  const inStudio = route.name === 'studio';
   const [streams, setStreams] = useState<LiveStream[]>([]);
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
@@ -282,6 +103,15 @@ function App() {
     text: msg(window.isSecureContext ? 'publish.idle' : 'publish.idleInsecure'),
     tone: window.isSecureContext ? 'idle' : 'warn',
   }));
+  // Broadcast studio (`/studio`) publish session.
+  const [studioPublishing, setStudioPublishing] = useState(false);
+  const [studioStatus, setStudioStatus] = useState<RtcStatus>(() => ({
+    text: msg('publish.idle'),
+    tone: 'idle',
+  }));
+  const [studioLiveInfo, setStudioLiveInfo] = useState<WhipCreatedInfo | null>(null);
+  const [studioPreviewStream, setStudioPreviewStream] = useState<MediaStream | null>(null);
+  const [studioMessages, setStudioMessages] = useState<TextMessage[]>([]);
   // Cover image: compressed locally, uploaded after the stream is created.
   const [cover, setCover] = useState<PreparedCover | null>(null);
   const [coverBusy, setCoverBusy] = useState(false);
@@ -308,8 +138,9 @@ function App() {
   const previewVideo = useRef<HTMLVideoElement>(null);
   const coverInput = useRef<HTMLInputElement>(null);
   const live2dHost = useRef<HTMLDivElement>(null);
-  const publisher = useRef<Publisher | null>(null);
-  const publishReleaseRef = useRef<(() => void) | null>(null);
+  const publisher = useRef<WhipPublisher | null>(null);
+  // Studio publishing lives at App level so opening the live room does not stop it.
+  const studioPublisher = useRef<WhipPublisher | null>(null);
   const chatSocket = useRef<WebSocket | null>(null);
   const playbackTeardown = useRef<(() => void) | null>(null);
   const rtcToneRef = useRef<RtcTone>('idle');
@@ -393,15 +224,16 @@ function App() {
     setPublishFps((current) => (current === 60 ? 30 : current));
   }, [capacity]);
 
-  // Browser tab title reflects the room that is open.
+  // Browser tab title reflects the room or studio that is open.
   useEffect(() => {
-    document.title = roomDetail ? t('room.documentTitle', { title: roomDetail.title }) : t('app.title');
-  }, [roomDetail, lang]);
+    if (inStudio) document.title = t('studio.documentTitle');
+    else document.title = roomDetail ? t('room.documentTitle', { title: roomDetail.title }) : t('app.title');
+  }, [inStudio, roomDetail, lang]);
 
-  // Scroll to the top when switching between the lobby and a room.
+  // Scroll to the top when switching between the lobby, a room and the studio.
   useEffect(() => {
     window.scrollTo(0, 0);
-  }, [roomId]);
+  }, [roomId, inStudio]);
 
   // Route -> room detail. The lobby entry is used as an instant placeholder and then
   // GET /api/streams/:id refreshes it (and brings the authoritative viewer count).
@@ -825,12 +657,12 @@ function App() {
     };
   }, [chatStreamId, token]);
 
-  // Keep the latest publish teardown reachable from the unmount cleanup, and release
-  // the camera/screen capture whenever this page is torn down.
-  useEffect(() => {
-    publishReleaseRef.current = () => releasePublisher();
-  });
-  useEffect(() => () => { publishReleaseRef.current?.(); }, []);
+  // Release every media session when the app shell is torn down (page close/HMR).
+  // Route changes keep publishing alive: the studio publisher is App-owned on purpose.
+  useEffect(() => () => {
+    publisher.current?.stop();
+    studioPublisher.current?.stop();
+  }, []);
 
   async function auth(path: 'login' | 'register') {
     try {
@@ -916,135 +748,40 @@ function App() {
     }
   }
 
-  /**
-   * Idempotent browser-publish teardown: aborts the in-flight WHIP request and
-   * ICE gathering, closes the PeerConnection, stops every local capture track and
-   * clears the preview. Called by stop, by track-end auto-stop and by unmount.
-   */
-  function releasePublisher(notice?: RtcStatus) {
-    const runtime = publisher.current;
-    publisher.current = null;
-    if (runtime) {
-      try { runtime.controller.abort(); } catch { /* already aborted */ }
-      if (runtime.pc) {
-        runtime.pc.onconnectionstatechange = null;
-        runtime.pc.oniceconnectionstatechange = null;
-        try { runtime.pc.close(); } catch { /* already closed */ }
-      }
-      if (runtime.composite) {
-        try { runtime.composite.stop(); } catch { /* already stopped */ }
-        runtime.composite = null;
-      }
-      if (runtime.sourceVideo) {
-        runtime.sourceVideo.srcObject = null;
-        runtime.sourceVideo.remove();
-        runtime.sourceVideo = null;
-      }
-      stopCaptureTracks(runtime.stream);
-    }
-    const preview = previewVideo.current;
-    if (preview && preview.srcObject) preview.srcObject = null;
-    setPublishing(false);
-    if (notice) setPublishStatus(notice);
+  /** Build the lobby publish engine with the App state callbacks. */
+  function createLobbyPublisher(): WhipPublisher {
+    return new WhipPublisher({
+      onStatus: (text, tone) => setPublishStatus({ text, tone }),
+      onLog: (parts) => showMessage(...parts),
+      onCreated: (info) => setLastCreated(info),
+      onCoverError: (text) => setCoverError(text),
+      onPreview: (stream) => {
+        const preview = previewVideo.current;
+        if (!preview) return;
+        preview.srcObject = stream;
+        if (stream) {
+          preview.muted = true;
+          void preview.play().catch(() => undefined);
+        }
+      },
+      onSessionEnd: (notice) => {
+        publisher.current = null;
+        setPublishing(false);
+        setPublishStatus(notice);
+        if (previewVideo.current) previewVideo.current.srcObject = null;
+      },
+      onLiveChanged: () => { void load(); },
+    });
   }
 
-  function stopPublish(notice: TextMessage = msg('msg.publishStopped')) {
-    if (!publisher.current) {
-      setPublishing(false);
-      if (previewVideo.current?.srcObject) previewVideo.current.srcObject = null;
-      return;
-    }
-    releasePublisher({ text: msg('publish.stopped'), tone: 'idle' });
-    showMessage(notice);
-    // SRS calls on_unpublish when the PeerConnection closes; refresh the lobby.
-    void load();
-  }
-
-  /**
-   * Switch the Live2D overlay on/off for a publish session that is already live.
-   * Only the video track is replaced; audio keeps flowing from the capture device.
-   */
-  async function applyPublisherOverlay(enabled: boolean) {
-    const runtime = publisher.current;
-    if (!runtime || !runtime.pc || !runtime.stream) return;
-    const videoSender = runtime.pc.getSenders().find((sender) => sender.track?.kind === 'video');
-    if (!videoSender) return;
-    if (!enabled) {
-      const original = runtime.originalVideoTrack;
-      if (original && original.readyState === 'live') {
-        try { await videoSender.replaceTrack(original); } catch { /* keep composite if swap fails */ }
-      }
-      if (runtime.composite) {
-        runtime.composite.stop();
-        runtime.composite = null;
-      }
-      if (runtime.sourceVideo) {
-        runtime.sourceVideo.srcObject = null;
-        runtime.sourceVideo.remove();
-        runtime.sourceVideo = null;
-      }
-      if (previewVideo.current) previewVideo.current.srcObject = runtime.stream;
-      setPublishStatus({ text: msg('publish.overlayOff'), tone: 'info' });
-      return;
-    }
-    const modelCanvas = getLive2DCanvas();
-    if (!modelCanvas) {
-      setPublishStatus({ text: msg('publish.overlayNoModel'), tone: 'warn' });
-      return;
-    }
-    try {
-      let source = runtime.sourceVideo;
-      if (!source) {
-        source = document.createElement('video');
-        source.muted = true;
-        source.playsInline = true;
-        source.srcObject = runtime.stream;
-        runtime.sourceVideo = source;
-        void source.play().catch(() => undefined);
-      }
-      if (source.readyState < 2) {
-        await new Promise<void>((resolve) => {
-          if (!source) { resolve(); return; }
-          const done = () => { source?.removeEventListener('loadeddata', done); window.clearTimeout(timer); resolve(); };
-          const timer = window.setTimeout(done, 2000);
-          source.addEventListener('loadeddata', done);
-        });
-      }
-      if (runtime.composite) {
-        runtime.composite.stop();
-        runtime.composite = null;
-      }
-      const handle = createOverlayStream(source, { width: 1280, height: 720, fps: runtime.fps });
-      runtime.composite = handle;
-      const track = handle.stream.getVideoTracks()[0];
-      if (!track) throw new LocalizedError(msg('publish.noVideoTrack'));
-      await videoSender.replaceTrack(track);
-      if (previewVideo.current) previewVideo.current.srcObject = handle.stream;
-      setPublishStatus({ text: msg('publish.overlayOn'), tone: 'ok' });
-    } catch (error: any) {
-      setPublishStatus({
-        text: msg('publish.overlayEnableFailed', { detail: errorMessage(error, msg('common.unknownError')) }),
-        tone: 'error',
-      });
-    }
-  }
-
-  /** Toggle the overlay preference; hot-swaps tracks when already publishing. */
-  function togglePublishOverlay(next: boolean) {
-    setPublishOverlay(next);
-    if (publisher.current?.pc) void applyPublisherOverlay(next);
-    else if (next && !live2dState.hasModel) {
-      setPublishStatus({ text: msg('publish.overlayNoModelWarn'), tone: 'warn' });
-    }
-  }
-
+  /** Start browser publishing from the lobby publish card (WHIP). */
   async function startPublish() {
     if (publishing || publisher.current) return;
     if (!token) {
       setPublishStatus({ text: msg('publish.needLogin'), tone: 'warn' });
       return;
     }
-    if (!window.isSecureContext) {
+    if (!secureContext) {
       setPublishStatus({ text: msg('publish.insecure'), tone: 'error' });
       return;
     }
@@ -1059,237 +796,89 @@ function App() {
       return;
     }
     const resolution = PUBLISH_RESOLUTIONS.find((item) => item.key === publishResolution) ?? PUBLISH_RESOLUTIONS[0];
-    const fps = publishFps;
-    const wantedOverlay = publishOverlay;
-    const preparedCover = cover;
-    const title = publishTitle.trim() || t('msg.userStreamTitle', { name: username || msg('common.userName') });
-    const controller = new AbortController();
-    const runtime: Publisher = {
-      controller,
-      stream: null,
-      pc: null,
-      fps,
-      originalVideoTrack: null,
-      composite: null,
-      sourceVideo: null,
-    };
-    publisher.current = runtime;
+    const engine = createLobbyPublisher();
+    publisher.current = engine;
     setPublishing(true);
     setPublishStatus({ text: msg('publish.creating'), tone: 'info' });
-    try {
-      // 1. Create the stream record on the backend and get its WHIP publish path.
-      const response = await fetch(`${API}/api/streams`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ title }),
-        signal: controller.signal,
-      });
-      const data = await response.json().catch(() => null);
-      if (publisher.current !== runtime) return;
-      if (!response.ok) {
-        throw new LocalizedError(data?.error
-          ? backendText(String(data.error), response.status)
-          : msg('publish.createFailed', { status: response.status }));
-      }
-      const streamId = Number(data?.id);
-      const publishPath = typeof data?.publishPath === 'string' && data.publishPath
-        ? data.publishPath
-        : (Number.isSafeInteger(streamId) && streamId > 0 ? `/api/streams/${streamId}/whip` : '');
-      if (!Number.isSafeInteger(streamId) || streamId < 1 || !publishPath) {
-        throw new LocalizedError(msg('publish.badCreateResponse'));
-      }
+    await engine.start({
+      token,
+      title: publishTitle.trim() || t('msg.userStreamTitle', { name: username || msg('common.userName') }),
+      source,
+      resolution,
+      fps: publishFps,
+      cover,
+      overlay: publishOverlay,
+    });
+  }
 
-      // 2. Upload the compressed cover (if selected) before going live.
-      let uploadedCoverUrl: string | null = null;
-      let coverNote: TextMessage | null = null;
-      if (preparedCover) {
-        setPublishStatus({ text: msg('publish.uploadingCover'), tone: 'info' });
-        try {
-          uploadedCoverUrl = await uploadCover(API, token, streamId, preparedCover.dataUrl);
-          coverNote = msg('msg.coverUploadedNote', { url: resolveAssetUrl(API, uploadedCoverUrl) });
-        } catch (error: any) {
-          coverNote = msg('msg.coverUploadFailedNote', {
-            detail: errorMessage(error, msg('common.unknownError')),
-          });
-          setCoverError(errorMessage(error, msg('cover.uploadFailedFallback')));
-        }
-        if (publisher.current !== runtime) return;
-      }
-      setLastCreated({ id: streamId, title, coverUrl: uploadedCoverUrl });
-
-      // 3. Capture camera or screen with ideal resolution/frame-rate constraints.
-      setPublishStatus({
-        text: msg(source === 'screen' ? 'publish.pickShareTarget' : 'publish.requestingDevice'),
-        tone: 'info',
-      });
-      const videoConstraints: MediaTrackConstraints = {
-        width: { ideal: resolution.width },
-        height: { ideal: resolution.height },
-        frameRate: { ideal: fps },
-      };
-      const capture = source === 'screen'
-        ? await devices.getDisplayMedia({ video: videoConstraints, audio: true })
-        : await devices.getUserMedia({ video: videoConstraints, audio: true });
-      runtime.stream = capture;
-      if (publisher.current !== runtime) { stopCaptureTracks(capture); return; }
-      runtime.originalVideoTrack = capture.getVideoTracks()[0] ?? null;
-
-      // 4. Optional Live2D compositing: a hidden <video> feeds the overlay canvas.
-      let overlayNote: TextMessage | null = null;
-      if (wantedOverlay) {
-        if (!getLive2DCanvas()) {
-          overlayNote = msg('msg.overlayMissingNote');
-        } else {
-          try {
-            const overlaySource = document.createElement('video');
-            overlaySource.muted = true;
-            overlaySource.playsInline = true;
-            overlaySource.srcObject = capture;
-            runtime.sourceVideo = overlaySource;
-            void overlaySource.play().catch(() => undefined);
-            runtime.composite = createOverlayStream(overlaySource, {
-              width: resolution.width,
-              height: resolution.height,
-              fps,
-            });
-          } catch (error: any) {
-            if (runtime.composite) { runtime.composite.stop(); runtime.composite = null; }
-            overlayNote = msg('msg.overlayUnavailableNote', {
-              detail: errorMessage(error, msg('common.unknownError')),
-            });
-          }
-        }
-      }
-
-      const preview = previewVideo.current;
-      if (preview) {
-        preview.srcObject = runtime.composite?.stream ?? capture;
-        preview.muted = true;
-        void preview.play().catch(() => undefined);
-      }
-
-      // 5. PeerConnection with H.264 preferred, then a single-shot ICE offer (WHIP).
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-      runtime.pc = pc;
-      const outgoingVideo = runtime.composite?.stream.getVideoTracks()[0] ?? runtime.originalVideoTrack;
-      if (outgoingVideo) {
-        pc.addTrack(outgoingVideo, runtime.composite?.stream ?? capture);
-      }
-      for (const track of capture.getAudioTracks()) {
-        pc.addTrack(track, capture);
-      }
-      // Screen-share/camera video tracks end when the user stops sharing or unplugs
-      // the device; stop the publish session too. The raw track stays alive even
-      // while a composite video track is being sent.
-      runtime.originalVideoTrack?.addEventListener('ended', () => {
-        if (publisher.current !== runtime) return;
-        releasePublisher({
-          text: msg(source === 'screen' ? 'publish.shareEnded' : 'publish.cameraEnded'),
-          tone: 'warn',
-        });
-        showMessage(msg(source === 'screen' ? 'publish.shareEndedMessage' : 'publish.cameraEndedMessage'));
-        void load();
-      });
-      preferH264(pc);
-      pc.onconnectionstatechange = () => {
-        if (publisher.current !== runtime) return;
-        switch (pc.connectionState) {
-          case 'connected':
-            setPublishStatus({ text: msg('publish.streamingConnected'), tone: 'ok' });
-            break;
-          case 'disconnected':
-            setPublishStatus({ text: msg('publish.disconnected'), tone: 'warn' });
-            break;
-          case 'failed':
-            setPublishStatus({ text: msg('publish.connectionFailed'), tone: 'error' });
-            break;
-          default:
-            break;
-        }
-      };
-      pc.oniceconnectionstatechange = () => {
-        if (publisher.current !== runtime) return;
-        switch (pc.iceConnectionState) {
-          case 'checking':
-            setPublishStatus({ text: msg('publish.iceChecking'), tone: 'info' });
-            break;
-          case 'connected':
-          case 'completed':
-            setPublishStatus({ text: msg('publish.iceConnected'), tone: 'ok' });
-            break;
-          case 'failed':
-            setPublishStatus({ text: msg('publish.iceFailed'), tone: 'error' });
-            break;
-          default:
-            break;
-        }
-      };
-
-      const offer = await pc.createOffer();
-      if (publisher.current !== runtime) return;
-      await pc.setLocalDescription(offer);
-      if (publisher.current !== runtime) return;
-      setPublishStatus({ text: msg('publish.gathering'), tone: 'info' });
-      const gathering = await waitForIceGathering(pc, controller.signal, 12000);
-      if (publisher.current !== runtime) return;
-      if (gathering === 'timeout') {
-        setPublishStatus({ text: msg('publish.iceTimeout'), tone: 'warn' });
-      }
-
-      // 6. POST the offer to the authenticated WHIP proxy; the answer completes the session.
-      const whipResponse = await fetch(`${API}${publishPath}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/sdp',
-          Accept: 'application/sdp',
-        },
-        body: pc.localDescription?.sdp || offer.sdp,
-        signal: controller.signal,
-      });
-      const answer = await whipResponse.text();
-      if (publisher.current !== runtime) return;
-      if (!whipResponse.ok) throw describeWhipFailure(whipResponse.status, answer);
-      if (!looksLikeSdp(answer)) throw new LocalizedError(msg('rtc.badAnswer'));
-      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
-      if (publisher.current !== runtime) return;
-      const overlayLabel = runtime.composite ? msg('msg.overlayLabel') : '';
-      setPublishStatus({
-        text: msg('publish.liveStatus', {
-          id: streamId,
-          resolution: msg(resolution.labelKey),
-          fps,
-          source: sourceText(source),
-          overlay: overlayLabel,
-        }),
-        tone: 'ok',
-      });
-      showMessage(
-        msg('msg.publishStarted', { id: streamId, title }),
-        msg('msg.publishUrl', { url: `${API}${publishPath}` }),
-        msg('msg.publishPicture', {
-          resolution: msg(resolution.labelKey),
-          fps,
-          source: sourceText(source),
-          overlay: overlayLabel,
-        }),
-        coverNote,
-        overlayNote,
-      );
-      await load();
-    } catch (error: any) {
-      if (publisher.current !== runtime) return;
-      const aborted = error?.name === 'AbortError' || controller.signal.aborted;
-      if (aborted) {
-        releasePublisher({ text: msg('publish.stopped'), tone: 'idle' });
-        return;
-      }
-      const text = PUBLISH_MEDIA_ERRORS.includes(String(error?.name))
-        ? describeMediaFailure(error, source)
-        : msg('publish.failed', { detail: errorMessage(error, msg('common.unknownError')) });
-      releasePublisher({ text, tone: 'error' });
-      showMessage(text, msg('msg.publishFailureHint'));
+  /** Stop the lobby publish session (SRS receives on_unpublish). */
+  function stopPublish(notice: TextMessage = msg('msg.publishStopped')) {
+    const engine = publisher.current;
+    if (!engine) {
+      setPublishing(false);
+      if (previewVideo.current?.srcObject) previewVideo.current.srcObject = null;
+      return;
     }
+    engine.stop({ text: msg('publish.stopped'), tone: 'idle' });
+    showMessage(notice);
+    void load();
+  }
+
+  /** Toggle the Live2D overlay preference; hot-swaps the video track while live. */
+  function togglePublishOverlay(next: boolean) {
+    setPublishOverlay(next);
+    const engine = publisher.current;
+    if (engine?.active) void engine.setOverlay(next);
+    else if (next && !live2dState.hasModel) {
+      setPublishStatus({ text: msg('publish.overlayNoModelWarn'), tone: 'warn' });
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Broadcast studio publish session (`/studio`)
+   * ------------------------------------------------------------------ */
+
+  /** Build the studio publish engine; it keeps running across route changes. */
+  function createStudioPublisher(): WhipPublisher {
+    return new WhipPublisher({
+      onStatus: (text, tone) => setStudioStatus({ text, tone }),
+      onLog: (parts) => setStudioMessages(parts.filter((part): part is TextMessage => Boolean(part))),
+      onCreated: (info) => setStudioLiveInfo(info),
+      onCoverError: (text) => setStudioMessages((previous) => [...previous, text]),
+      onPreview: (stream) => setStudioPreviewStream(stream),
+      onSessionEnd: (notice) => {
+        studioPublisher.current = null;
+        setStudioPublishing(false);
+        setStudioPreviewStream(null);
+        setStudioStatus(notice);
+      },
+      onLiveChanged: () => { void load(); },
+    });
+  }
+
+  /** Start the studio WHIP session with the capture stream from the device step. */
+  function startStudioPublish(request: StudioStartRequest) {
+    if (!token || studioPublisher.current) return;
+    const engine = createStudioPublisher();
+    studioPublisher.current = engine;
+    setStudioPublishing(true);
+    setStudioMessages([]);
+    setStudioLiveInfo(null);
+    setStudioStatus({ text: msg('publish.creating'), tone: 'info' });
+    void engine.start({ ...request, token });
+  }
+
+  /** Stop the studio session and release camera/mic/PC/preview. */
+  function stopStudioPublish() {
+    const engine = studioPublisher.current;
+    if (!engine) return;
+    engine.stop({ text: msg('publish.stopped'), tone: 'idle' });
+    setStudioMessages([msg('msg.publishStopped')]);
+  }
+
+  /** Hot-toggle the studio Live2D overlay while live. */
+  function setStudioOverlay(enabled: boolean) {
+    void studioPublisher.current?.setOverlay(enabled);
   }
 
   /** Lobby live card click: open the standalone room (login is prompted inside it). */
@@ -1313,10 +902,10 @@ function App() {
     navigate('/');
   }
 
-  /** Top-nav target while a room is open: return to the lobby, then scroll to a card. */
+  /** Top-nav target: back to the lobby, then scroll to a card. */
   function handleSectionNav(section: string) {
     return (event: React.MouseEvent<HTMLAnchorElement>) => {
-      if (!inRoom) return;
+      if (route.name === 'lobby') return;
       event.preventDefault();
       navigate('/');
       scrollToSection(section);
@@ -1330,6 +919,7 @@ function App() {
 
   function logout() {
     stopPublish(msg('msg.logoutStopped'));
+    stopStudioPublish();
     leaveRoom();
     setToken('');
     localStorage.removeItem('token');
@@ -1387,7 +977,7 @@ function App() {
             href="#top"
             aria-label={t('brand.home')}
             onClick={(event) => {
-              if (!inRoom) return;
+              if (route.name === 'lobby') return;
               event.preventDefault();
               navigate('/');
             }}
@@ -1399,6 +989,16 @@ function App() {
             <a href="#lobby" onClick={handleSectionNav('lobby')}>{t('nav.lobby')}</a>
             <a href="#publish" onClick={handleSectionNav('publish')}>{t('nav.publish')}</a>
             <a href="#live2d" onClick={handleSectionNav('live2d')}>{t('nav.live2d')}</a>
+            <a
+              href="/studio"
+              aria-current={inStudio ? 'page' : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                navigate(studioPath());
+              }}
+            >
+              {t('nav.studio')}
+            </a>
           </nav>
           <div className="top-actions">
             <div className="lang-switch" role="group" aria-label={t('lang.switch')}>
@@ -1419,6 +1019,9 @@ function App() {
                 {t('lang.en')}
               </button>
             </div>
+            {(publishing || studioPublishing) && (
+              <span className="state-pill ok live-pill" title={t('studio.live')}>{t('studio.live')}</span>
+            )}
             <span className={`conn-pill ${token ? 'online' : ''}`}>
               <i aria-hidden="true" />
               {token ? (username || t('topbar.signedIn')) : t('topbar.signedOut')}
@@ -1430,7 +1033,7 @@ function App() {
                   className="button small"
                   href="#auth"
                   onClick={(event) => {
-                    if (!inRoom) return;
+                    if (route.name === 'lobby') return;
                     event.preventDefault();
                     goLogin();
                   }}
@@ -1469,6 +1072,26 @@ function App() {
           onLogin={goLogin}
           onRetryLoad={() => setRoomRetryNonce((value) => value + 1)}
           onRetryConnect={() => setRetryNonce((value) => value + 1)}
+          currentUsername={username}
+          onOpenStudio={() => navigate(studioPath())}
+        />
+      ) : inStudio ? (
+        <StudioPage
+          token={token}
+          username={username}
+          capacity={capacity}
+          secureContext={secureContext}
+          publishing={studioPublishing}
+          status={studioStatus}
+          liveInfo={studioLiveInfo}
+          enginePreview={studioPreviewStream}
+          messages={studioMessages}
+          onStart={startStudioPublish}
+          onStop={stopStudioPublish}
+          onSetOverlay={setStudioOverlay}
+          onLogin={goLogin}
+          onBackToLobby={() => navigate('/')}
+          onOpenRoom={(id) => navigate(roomPath(id))}
         />
       ) : (
         <main className="page" id="top">

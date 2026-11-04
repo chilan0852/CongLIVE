@@ -1,9 +1,10 @@
 /**
  * Tiny History-API router for the CongLive web client.
  *
- * There are exactly two views:
+ * There are three views:
  *   `/`          the lobby (plus the publish and Live2D cards)
- *   `/room/<id>` the standalone live room (WHEP player + chat)
+ *   `/room/<id>` the standalone live room (WHEP player + chat + voice room)
+ *   `/studio`    the PC-first broadcast workbench (capture, Live2D, WHIP)
  *
  * Only the pathname is used for routing, so `/#publish` style in-page anchors keep
  * working. Deep links are served by the SPA fallback in nginx (`try_files ... /index.html`),
@@ -12,13 +13,15 @@
  */
 import { useSyncExternalStore } from 'react';
 
-export type Route = { name: 'lobby' } | { name: 'room'; streamId: number };
+export type Route = { name: 'lobby' } | { name: 'room'; streamId: number } | { name: 'studio' };
 
 const ROOM_PATH = /^\/room\/(\d+)\/?$/i;
+const STUDIO_PATH = /^\/studio\/?$/i;
 const NAVIGATE_EVENT = 'conglive:routechange';
 
 /** Parse a pathname into a route; unknown paths fall back to the lobby. */
 export function parseRoute(pathname: string): Route {
+  if (STUDIO_PATH.test(pathname || '')) return { name: 'studio' };
   const match = ROOM_PATH.exec(pathname || '/');
   if (match) {
     const streamId = Number(match[1]);
@@ -33,6 +36,11 @@ export function roomPath(streamId: number): string {
 
 export function lobbyPath(): string {
   return '/';
+}
+
+/** PC-first broadcast workbench. */
+export function studioPath(): string {
+  return '/studio';
 }
 
 const listeners = new Set<() => void>();

@@ -7,6 +7,7 @@
  * which keeps a single PeerConnection for the current room.
  */
 import { useEffect, useRef, type FormEvent, type RefObject } from 'react';
+import { useVoiceRoom, type VoicePeer, type VoicePhase } from './voice';
 import {
   coverFallbackChar,
   coverFallbackStyle,
@@ -48,6 +49,10 @@ export type RoomPageProps = {
   onLogin: () => void;
   onRetryLoad: () => void;
   onRetryConnect: () => void;
+  /** Signed-in username (used for the host badge / studio entry). */
+  currentUsername: string;
+  /** Open the PC-first broadcast workbench (`/studio`). */
+  onOpenStudio: () => void;
 };
 
 function latencyTone(sample: LatencySample | null): string {
@@ -77,6 +82,178 @@ function LatencyChip({ latency }: { latency: LatencySample | null }) {
   );
 }
 
+
+type VoicePanelProps = {
+  token: string;
+  streamId: number;
+  enabled: boolean;
+  /** Signed-in username (self avatar). */
+  currentUsername: string;
+  /** Room owner name (host badge on their row). */
+  hostName: string;
+  isHostSelf: boolean;
+};
+
+/** Voice room state pill label. */
+function voicePhaseLabel(phase: VoicePhase): string {
+  switch (phase) {
+    case 'joined': return t('voice.liveBadge');
+    case 'connecting':
+    case 'joining': return t('voice.joining');
+    case 'error': return t('voice.errorBadge');
+    default: return t('voice.idleBadge');
+  }
+}
+
+function voicePhaseTone(phase: VoicePhase): string {
+  switch (phase) {
+    case 'joined': return 'ok';
+    case 'connecting':
+    case 'joining': return 'info';
+    case 'error': return 'error';
+    default: return 'idle';
+  }
+}
+
+/** One participant row (self or a remote mesh peer). */
+function VoicePeerRow(props: {
+  name: string;
+  initial: string;
+  stateLabel: string;
+  speaking: boolean;
+  badge?: string | null;
+  dotOn: boolean;
+}) {
+  const { name, initial, stateLabel, speaking, badge, dotOn } = props;
+  return (
+    <li className={`voice-peer${speaking ? ' speaking' : ''}`}>
+      <span className="voice-avatar" aria-hidden="true">{initial}</span>
+      <span className="voice-name">
+        {name}
+        {badge ? <em>{badge}</em> : null}
+      </span>
+      <span className="voice-state">{stateLabel}</span>
+      <i className={`voice-dot${dotOn ? ' on' : ''}`} aria-hidden="true" />
+    </li>
+  );
+}
+
+/**
+ * Voice room ("语音房") inside the standalone room page.
+ *
+ * The hook is mounted with the room page but does nothing until the listener
+ * clicks "Join voice": no microphone capture, WebSocket or PeerConnection
+ * exists before that click, and unmount (leave / switch room / host ended)
+ * releases everything. Remote audio elements are appended to the hidden host.
+ */
+function VoicePanel({ token, streamId, enabled, currentUsername, hostName, isHostSelf }: VoicePanelProps) {
+  const voice = useVoiceRoom({ token, streamId, enabled });
+  const { snapshot, audioHostRef } = voice;
+  const joined = snapshot.phase === 'joined';
+  const busy = snapshot.phase === 'connecting' || snapshot.phase === 'joining';
+  const participants = snapshot.peers.length + (joined ? 1 : 0);
+  const localSpeaking = joined && !snapshot.muted && snapshot.localLevel > 0.07;
+  const selfName = t('voice.self');
+
+  return (
+    <section className="panel voice-panel" id="voice" aria-labelledby="voice-title">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow">{t('voice.eyebrow')}</span>
+          <h2 id="voice-title">
+            {t('voice.title')}
+            {' '}
+            <span className={`state-pill ${voicePhaseTone(snapshot.phase)}`}>
+              {busy ? t('voice.joining') : voicePhaseLabel(snapshot.phase)}
+            </span>
+          </h2>
+          <p className="hint">{t('voice.hint')}</p>
+        </div>
+        {joined && (
+          <span className="hint">{t('voice.participants', { count: participants })}</span>
+        )}
+      </div>
+
+      {/* Hidden container for the remote <audio> elements created by VoiceClient. */}
+      <div ref={audioHostRef} className="voice-audio-host" aria-hidden="true" />
+
+      {!token && <p className="hint warn-text">{t('voice.signInRequired')}</p>}
+      {token && !enabled && <p className="hint warn-text">{t('voice.unavailable')}</p>}
+      {snapshot.error && (
+        <p className="hint err-text" role="alert" aria-live="polite">{translateMessage(snapshot.error)}</p>
+      )}
+      {snapshot.audioBlocked && (
+        <button type="button" className="link-button" onClick={voice.resumeAudio}>
+          {t('voice.audioBlocked')}
+        </button>
+      )}
+
+      {!joined && !busy ? (
+        <div className="voice-join">
+          <button type="button" onClick={voice.join} disabled={!token || !enabled}>
+            {snapshot.phase === 'error' ? t('voice.retry') : t('voice.join')}
+          </button>
+          <p className="hint">{t('voice.joinHint')}</p>
+        </div>
+      ) : (
+        <>
+          <div className="voice-toolbar">
+            <button
+              type="button"
+              className="secondary small"
+              onClick={voice.toggleMute}
+              disabled={!joined}
+            >
+              {snapshot.muted ? t('voice.unmute') : t('voice.mute')}
+            </button>
+            <button type="button" className="ghost small" onClick={voice.leave}>
+              {t('voice.leave')}
+            </button>
+          </div>
+          {joined && (
+            <ul className="voice-peers">
+              <VoicePeerRow
+                name={selfName}
+                initial={(currentUsername || selfName).slice(0, 1).toUpperCase()}
+                stateLabel={snapshot.muted
+                  ? t('voice.mutedBadge')
+                  : localSpeaking
+                    ? t('voice.speaking')
+                    : t('voice.connected')}
+                speaking={localSpeaking}
+                badge={isHostSelf ? t('voice.host') : null}
+                dotOn={localSpeaking}
+              />
+              {snapshot.peers.map((peer: VoicePeer) => {
+                const state = snapshot.peerStates[peer.peerId] ?? 'connecting';
+                const speaking = state === 'connected' && !!snapshot.speaking[peer.peerId];
+                return (
+                  <VoicePeerRow
+                    key={peer.peerId}
+                    name={peer.username || `#${peer.userId}`}
+                    initial={(peer.username || '?').slice(0, 1).toUpperCase()}
+                    stateLabel={speaking
+                      ? t('voice.speaking')
+                      : state === 'connected'
+                        ? t('voice.connected')
+                        : state === 'failed'
+                          ? t('voice.error.signal')
+                          : t('voice.connecting')}
+                    speaking={speaking}
+                    badge={hostName && peer.username === hostName ? t('voice.host') : null}
+                    dotOn={speaking}
+                  />
+                );
+              })}
+            </ul>
+          )}
+          {joined && snapshot.peers.length === 0 && <p className="hint">{t('voice.empty')}</p>}
+        </>
+      )}
+    </section>
+  );
+}
+
 export function RoomPage(props: RoomPageProps) {
   const {
     roomId,
@@ -98,7 +275,10 @@ export function RoomPage(props: RoomPageProps) {
     onLogin,
     onRetryLoad,
     onRetryConnect,
+    currentUsername,
+    onOpenStudio,
   } = props;
+  const isHost = !!currentUsername && !!detail && detail.username === currentUsername;
 
   const chatList = useRef<HTMLDivElement>(null);
 
@@ -124,10 +304,23 @@ export function RoomPage(props: RoomPageProps) {
         <button type="button" className="secondary small room-back" onClick={onBack}>
           <span aria-hidden="true">←</span> {t('room.back')}
         </button>
-        <span className={`status-dot ${notFound || ended ? 'warn' : 'ok'}`}>
-          <i aria-hidden="true" />
-          {stateText}
-        </span>
+        <div className="room-topbar-actions">
+          {isHost && (
+            <>
+              <span className="room-chip host">
+                <i aria-hidden="true" />
+                {t('room.hostBadge')}
+              </span>
+              <button type="button" className="small" onClick={onOpenStudio}>
+                {t('room.studioEntry')}
+              </button>
+            </>
+          )}
+          <span className={`status-dot ${notFound || ended ? 'warn' : 'ok'}`}>
+            <i aria-hidden="true" />
+            {stateText}
+          </span>
+        </div>
       </div>
 
       {notFound ? (
@@ -182,6 +375,7 @@ export function RoomPage(props: RoomPageProps) {
                   {translateMessage(rtcStatus.text)}
                 </span>
               </div>
+              {isHost && <p className="hint room-host-hint">{t('room.studioEntryHint')}</p>}
             </div>
           </section>
 
@@ -237,6 +431,16 @@ export function RoomPage(props: RoomPageProps) {
               <p className="hint">{t('room.playerHint')}</p>
             </section>
 
+            <div className="room-side">
+            <VoicePanel
+              token={token}
+              streamId={roomId}
+              enabled={canConnect}
+              currentUsername={currentUsername}
+              hostName={host}
+              isHostSelf={isHost}
+            />
+
             <aside className="panel chat-panel room-chat" id="chat">
               <div className="panel-head">
                 <div>
@@ -269,6 +473,7 @@ export function RoomPage(props: RoomPageProps) {
                 <button disabled={!canChat}>{t('chat.send')}</button>
               </form>
             </aside>
+            </div>
           </div>
         </>
       )}

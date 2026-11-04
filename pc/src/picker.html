@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>选择共享内容</title>
+  <link rel="stylesheet" href="picker.css" />
+</head>
+<body>
+  <main class="picker">
+    <header class="head">
+      <div>
+        <h1 data-i18n="title">选择要共享的内容</h1>
+        <p data-i18n="hint">选择整个屏幕或某个窗口。共享只会在本次开播期间进行。</p>
+      </div>
+      <div class="filters" role="group" aria-label="Filter">
+        <button type="button" class="filter active" data-filter="all" data-i18n="filterAll">全部</button>
+        <button type="button" class="filter" data-filter="screen" data-i18n="filterScreens">屏幕</button>
+        <button type="button" class="filter" data-filter="window" data-i18n="filterWindows">窗口</button>
+      </div>
+    </header>
+
+    <div id="sources" class="sources" role="listbox" aria-label="Sources"></div>
+    <p id="empty" class="empty" hidden data-i18n="empty">没有可共享的屏幕或窗口。</p>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <footer class="foot">
+      <label id="audio-row" class="audio" hidden>
+        <input id="audio" type="checkbox" />
+        <span data-i18n="includeAudio">同时共享系统声音</span>
+      </label>
+      <div class="actions">
+        <button id="cancel" type="button" class="secondary" data-i18n="cancel">取消</button>
+        <button id="share" type="button" class="primary" data-i18n="share" disabled>开始共享</button>
+      </div>
+    </footer>
+  </main>
+  <script src="picker.js"></script>
+</body>
+</html>
