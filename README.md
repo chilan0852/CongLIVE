@@ -1,5 +1,7 @@
 # CongLive 葱直播
 
+[English](README.en.md) | 中文
+
 **WebRTC 超低延迟直播：Android 手机开播、浏览器开播、双端 WHEP 观看。**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-8b6cff.svg)](LICENSE)

@@ -1,5 +1,7 @@
 # Third-Party Notices
 
+[English](THIRD_PARTY_NOTICES.en.md) | 中文
+
 本项目自有代码采用 [MIT](LICENSE)。以下组件/服务由第三方提供，适用其各自许可证；本文件是工程清单，不构成法律意见，实际以各上游 LICENSE 为准。
 
 | 组件 | 用途 | 许可证 / 说明 |
