@@ -75,6 +75,13 @@ npm run typecheck
 npm run build      # 或 npm run dev
 ```
 
+### Windows 便携客户端
+
+- 从 [最新 Release](https://github.com/chilan0852/CongLIVE/releases/latest) 下载 `CongLive-win32-x64-portable.zip`
+- 解压后运行 `CongLive.exe`（Windows 10/11 x64 便携版，无需安装）
+- 首次启动填写服务器域名/IP（默认 `https://xinglan.work`）；之后按 `Ctrl+Shift+S` 可修改
+- 支持摄像头、麦克风、屏幕共享；未签名构建，SmartScreen 可能提示
+
 ### Android APK 下载
 
 - [最新 Release](https://github.com/chilan0852/CongLIVE/releases/latest)

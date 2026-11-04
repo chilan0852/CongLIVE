@@ -85,6 +85,13 @@ gradle :app:assembleDebug
 
 APK output: `android/app/build/outputs/apk/debug/app-debug.apk`. In the app, open **Me → Server settings** and enter your API origin (e.g. `https://live.example.com`).
 
+### Windows portable client
+
+- Download `CongLive-win32-x64-portable.zip` from the [latest release](https://github.com/chilan0852/CongLIVE/releases/latest).
+- Unzip and run `CongLive.exe` (Windows 10/11 x64 portable; no installer).
+- On first launch enter the server domain/IP (default `https://xinglan.work`); press `Ctrl+Shift+S` later to change it.
+- Camera, microphone and screen sharing supported. The build is unsigned, so SmartScreen may warn.
+
 ### Android APK download
 
 - [Latest release](https://github.com/chilan0852/CongLIVE/releases/latest)
