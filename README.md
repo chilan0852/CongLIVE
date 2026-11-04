@@ -131,4 +131,4 @@ docs/             README 截图等
 
 ## License
 
-[MIT](LICENSE) © 2026 CongLive contributors
+[MIT](LICENSE) © 2026 chilan0852
