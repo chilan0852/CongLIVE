@@ -676,6 +676,20 @@ object L10n {
             "与某位参与者的音频连接失败，可尝试离开后重新加入。" to
                 "The audio connection to a participant failed; leave and rejoin to retry."
             ),
+        // v0.8.1: TURN relay status shown in the voice card.
+        "voice.relay.checking" to (
+            "正在获取中继凭据…" to
+                "Fetching relay credentials…"
+            ),
+        "voice.relay.turn" to (
+            "中继：TURN（跨 NAT 更稳定）" to
+                "Relay: TURN (more reliable across NAT)"
+            ),
+        "voice.relay.stun" to ("直连 / STUN" to "Direct / STUN"),
+        "voice.relay.fallback" to (
+            "无法获取 TURN 凭据（%s），已回退 STUN 直连；严格 NAT/防火墙环境可能无法建立语音。" to
+                "Could not get TURN credentials (%s); falling back to direct STUN. Voice may fail behind strict NAT/firewalls."
+            ),
         // ------------------------------------------------------------ playback
         "playback.firstFrame" to ("已收到视频首帧" to "First video frame received"),
         "playback.peerCreateFailed" to ("无法创建 WebRTC 播放连接" to "Could not create the WebRTC playback connection"),

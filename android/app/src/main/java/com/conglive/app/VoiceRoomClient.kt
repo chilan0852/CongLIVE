@@ -71,6 +71,12 @@ data class VoiceSnapshot(
  */
 class VoiceRoomClient(
     context: Context,
+    /**
+     * v0.8.1: ICE config from the Activity — short-lived TURN credentials
+     * (GET /api/turn-credentials) or the STUN fallback. Reused by every mesh
+     * PeerConnection; VoiceRoomClient never hard-codes STUN itself.
+     */
+    private val iceServers: List<PeerConnection.IceServer>,
     private val sendSignal: (JSONObject) -> Boolean,
     private val lang: Lang = L10n.read(context),
     private val onUpdate: (VoiceSnapshot) -> Unit,
@@ -79,7 +85,6 @@ class VoiceRoomClient(
         private const val STATS_INTERVAL_MS = 500L
         private const val SPEAKING_THRESHOLD = 0.06f
         private const val ENERGY_SPEAKING_THRESHOLD = 0.0004
-        private const val STUN_URL = "stun:stun.l.google.com:19302"
         private const val AUDIO_TRACK_ID = "conglive-voice-mic"
         private const val AUDIO_STREAM_ID = "conglive-voice"
         /** Upper bound for one SDP callback so a leave cannot block the worker forever. */
@@ -289,8 +294,8 @@ class VoiceRoomClient(
         peers[info.peerId]?.let { return it }
         val pcFactory = factory ?: return null
         val local = localTrack
-        val iceServer = PeerConnection.IceServer.builder(STUN_URL).createIceServer()
-        val config = PeerConnection.RTCConfiguration(listOf(iceServer)).apply {
+        // v0.8.1: the same TURN/STUN list is reused by every peer (and by a rejoin).
+        val config = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
         }
         val session = PeerSession(info)

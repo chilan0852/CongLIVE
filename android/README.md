@@ -1,4 +1,4 @@
-# CongLive Android v0.8.0 — 独立直播间 + 全双工语音房 + 1080p60 容量门控 + 延迟监控 + 域名服务器
+# CongLive Android v0.8.1 — 独立直播间 + 全双工语音房（TURN 中继）+ 1080p60 容量门控 + 延迟监控 + 域名服务器
 
 Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观看使用 WHEP；保留账号、个人直播、WebSocket 弹幕和 MP4 录像播放。
 
@@ -20,7 +20,7 @@ Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观�
   - 摄像头直播按横屏尺寸采集，屏幕直播按竖屏尺寸采集（服务端交换宽高），码率与帧率写入视频 RTP sender。
 - 大厅点击直播卡片进入**独立直播间页面**（全屏替代大厅）：返回按钮、封面/标题/主播、WHEP 播放器、实时弹幕、观看人数；`GET /api/streams/:id` 轮询 + WebSocket `viewers` 更新人数，直播结束或 404 自动回大厅。
 - WHEP 播放每秒通过 `getStats` 读取 `jitterBufferDelay / jitterBufferEmittedCount` 与 `currentRoundTripTime`，在房间页显示「延迟≈Xms」；停止播放/离开房间即停止采样并释放 PeerConnection。
-- **全双工语音房（v0.8.0）**：独立直播间内可「加入语音」，加入时才申请 RECORD_AUDIO 并采集麦克风；基于已登录房间 WebSocket 的 voice 信令协议（与 Web 端 `web/src/voice.ts` 对齐），每个远端参与者一个 audio-only PeerConnection（mesh），小 peerId 发 offer；房间页显示参与者/说话状态，支持静音与离开；离开、切房、下播或销毁时释放全部 PC/麦克风/监听。
+- **全双工语音房（v0.8.0 / TURN v0.8.1）**：独立直播间内可「加入语音」，加入时才申请 RECORD_AUDIO 并采集麦克风；基于已登录房间 WebSocket 的 voice 信令协议（与 Web 端 `web/src/voice.ts` 对齐），每个远端参与者一个 audio-only PeerConnection（mesh），小 peerId 发 offer；房间页显示参与者/说话状态，支持静音与离开；离开、切房、下播或销毁时释放全部 PC/麦克风/监听。
 - 麦克风由 `org.webrtc.audio.JavaAudioDeviceModule` 提供。
 - WHEP 客户端接收音视频，直播不使用 HLS/HTTP-FLV。
 - WebSocket 弹幕、个人录像列表、Media3 MP4 回放保留。
@@ -125,3 +125,11 @@ gradle :app:assembleDebug
 - **静音 / 离开 / 清理**：支持静音 / 取消静音；离开语音、切换/退出直播间、直播结束、WS 断开或 Activity 销毁时发送 `voice-leave`，关闭所有 PeerConnection、释放 AudioTrack/AudioSource/ADM/EglBase 与信令监听。
 - **中英双语**：语音房所有按钮、状态、错误（麦克风拒绝/占用/未找到、信令错误、限流等）均加入 L10n 字典。
 - **版本**：versionCode 22 / versionName 0.8.0，minSdk 29 / targetSdk 34。0.7.9 的独立房间、1080p60 门控、延迟监控、域名服务器、图标与双语全部保留。
+
+## v0.8.1 新增（语音房 TURN 中继）
+
+- **TURN 凭据**：加入语音前由 MainActivity 带 Bearer 调用 `GET /api/turn-credentials`；200 时解析 `urls` / `username` / `credential`，为每个 TURN/STUN URL 构造 `PeerConnection.IceServer`（`setUsername` / `setPassword`），交给 `VoiceRoomClient` 供所有 mesh PeerConnection 复用（重连同样复用）。
+- **STUN 回退**：接口 503（未配置 TURN_SECRET）、401/403 或网络失败时回退 `stun:stun.l.google.com:19302` + `stun:stun.cloudflare.com:3478` 直连，语音房仍可用。
+- **中继状态**：语音卡片显示「正在获取中继凭据… / 中继：TURN（跨 NAT 更稳定） / 直连 / STUN / 无法获取 TURN 凭据（HTTP xxx），已回退 STUN 直连」，中英双语。
+- **无硬编码 STUN**：`VoiceRoomClient` 只使用构造参数传入的 ICE 列表，`RTCConfiguration(iceServers)` 每个远端 peer 复用之。
+- **版本**：versionCode 23 / versionName 0.8.1；0.8.0 的 lazy mic / 信令 / 说话状态 / 清理逻辑与 0.7.9 功能全部保留。

@@ -43,6 +43,7 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import org.webrtc.PeerConnection
 import org.webrtc.SurfaceViewRenderer
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -90,6 +91,9 @@ private data class ChatMessage(
     val content: String,
     val createdAt: String
 )
+
+/** v0.8.1: which ICE config the voice room ended up using (shown in the voice card). */
+private enum class VoiceRelayMode { IDLE, CHECKING, TURN, STUN }
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -198,6 +202,12 @@ class MainActivity : AppCompatActivity() {
     private var voiceSnapshot = VoiceSnapshot()
     private var voicePendingJoin = false
     private var voiceCardBody: LinearLayout? = null
+    /** v0.8.1: ICE config from GET /api/turn-credentials, or the STUN fallback. */
+    private var voiceIceServers: List<PeerConnection.IceServer> = emptyList()
+    private var voicePendingIceServers: List<PeerConnection.IceServer>? = null
+    private var voiceRelayMode = VoiceRelayMode.IDLE
+    private var voiceRelayCode: Int? = null
+    private var voiceJoinPreparing = false
 
     private var navButtons: MutableList<LinearLayout> = mutableListOf()
     private var pendingCoverStreamId: Long = 0L
@@ -230,7 +240,7 @@ class MainActivity : AppCompatActivity() {
      */
     private val voiceMicPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
-            startVoiceJoin()
+            prepareVoiceJoin()
         } else {
             voicePendingJoin = false
             voiceSnapshot = voiceSnapshot.copy(error = tr("voice.error.micDenied"))
@@ -411,7 +421,7 @@ class MainActivity : AppCompatActivity() {
         })
         header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
-            text = "v0.8.0"
+            text = "v0.8.1"
             textSize = 10.5f
             setTextColor(0xFFD9CEFF.toInt())
             gravity = Gravity.CENTER
@@ -902,6 +912,15 @@ class MainActivity : AppCompatActivity() {
         }
         val participantCount = current.peers.size + if (current.self != null) 1 else 0
         box.addView(body("$phaseText · ${tr("voice.participants", participantCount)}"))
+        val relayText = voiceRelayText()
+        if (relayText != null) {
+            box.addView(TextView(this).apply {
+                text = relayText
+                textSize = 11.5f
+                setTextColor(if (voiceRelayMode == VoiceRelayMode.TURN) TEAL else AMBER)
+                setPadding(0, dp(2), 0, dp(4))
+            })
+        }
         val error = current.error
         if (!error.isNullOrBlank()) {
             box.addView(TextView(this).apply {
@@ -997,24 +1016,99 @@ class MainActivity : AppCompatActivity() {
             voiceMicPermission.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        startVoiceJoin()
+        prepareVoiceJoin()
     }
 
-    private fun startVoiceJoin() {
+    /**
+     * v0.8.1: fetch short-lived TURN credentials (Bearer) right before joining voice.
+     * 503 / network / auth failure keeps the voice room usable through the STUN
+     * fallback and shows the relay state in the voice card.
+     */
+    private fun prepareVoiceJoin() {
+        if (roomStream == null || voiceJoinPreparing) return
+        voiceJoinPreparing = true
+        voiceRelayMode = VoiceRelayMode.CHECKING
+        voiceRelayCode = null
+        fillVoiceCard()
+        apiRequest("GET", "/api/turn-credentials", null, true) { result ->
+            voiceJoinPreparing = false
+            if (roomStream == null) {
+                voiceRelayMode = VoiceRelayMode.IDLE
+                voiceRelayCode = null
+                fillVoiceCard()
+                return@apiRequest
+            }
+            val turnServers = if (result.code in 200..299) buildIceServers(result.obj) else emptyList()
+            if (turnServers.isNotEmpty()) {
+                voiceRelayMode = VoiceRelayMode.TURN
+                voiceRelayCode = null
+                voiceIceServers = turnServers
+            } else {
+                voiceRelayMode = VoiceRelayMode.STUN
+                voiceRelayCode = if (result.code in 200..299) null else result.code
+                voiceIceServers = voiceStunFallbackIceServers()
+            }
+            fillVoiceCard()
+            startVoiceJoin(voiceIceServers)
+        }
+    }
+
+    /**
+     * v0.8.1: `{urls, username, credential}` -> one IceServer per TURN/STUN URL,
+     * each with the shared coturn REST username/password.
+     */
+    private fun buildIceServers(payload: JSONObject?): List<PeerConnection.IceServer> {
+        val obj = payload ?: return emptyList()
+        val urls = mutableListOf<String>()
+        when (val raw = obj.opt("urls")) {
+            is JSONArray -> for (i in 0 until raw.length()) {
+                val url = raw.optString(i, "").trim()
+                if (url.isNotEmpty()) urls.add(url)
+            }
+            is String -> raw.trim().takeIf { it.isNotEmpty() }?.let { urls.add(it) }
+        }
+        val username = obj.optString("username", "").trim()
+        val credential = obj.optString("credential", "").trim()
+        val valid = urls
+            .filter {
+                it.startsWith("turn:") || it.startsWith("turns:") ||
+                    it.startsWith("stun:") || it.startsWith("stuns:")
+            }
+            .distinct()
+        if (valid.isEmpty()) return emptyList()
+        return valid.map { url ->
+            val builder = PeerConnection.IceServer.builder(url)
+            if (username.isNotEmpty() && credential.isNotEmpty()) {
+                builder.setUsername(username).setPassword(credential)
+            }
+            builder.createIceServer()
+        }
+    }
+
+    /** v0.8.1: used when GET /api/turn-credentials is unavailable (no TURN_SECRET / offline). */
+    private fun voiceStunFallbackIceServers(): List<PeerConnection.IceServer> = listOf(
+        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+        PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer()
+    )
+
+    private fun startVoiceJoin(iceServers: List<PeerConnection.IceServer>) {
         if (roomStream == null) return
         voicePendingJoin = false
+        voiceIceServers = iceServers
         if (!chatSocketReady || chatSocket == null) {
             // The room WebSocket authenticates first; retry as soon as `ready` arrives.
             voicePendingJoin = true
+            voicePendingIceServers = iceServers
             setStatus(tr("voice.joining"))
             fillVoiceCard()
             return
         }
-        teardownVoice()
+        teardownVoice(keepRelay = true)
         voiceSnapshot = VoiceSnapshot(phase = VoicePhase.CONNECTING)
         fillVoiceCard()
         val client = VoiceRoomClient(
             this,
+            iceServers,
             { payload -> sendVoiceSignal(payload) },
             lang
         ) { snapshot ->
@@ -1035,7 +1129,10 @@ class MainActivity : AppCompatActivity() {
         voiceClient?.leave()
         voiceClient = null
         voicePendingJoin = false
+        voicePendingIceServers = null
         voiceSnapshot = VoiceSnapshot()
+        voiceRelayMode = VoiceRelayMode.IDLE
+        voiceRelayCode = null
         fillVoiceCard()
     }
 
@@ -1043,12 +1140,34 @@ class MainActivity : AppCompatActivity() {
         voiceClient?.toggleMute()
     }
 
-    /** Releases the whole mesh: leave button, room switch, stream ended or destroy. */
-    private fun teardownVoice() {
+    /** v0.8.1: TURN established vs STUN fallback line in the voice card. */
+    private fun voiceRelayText(): String? = when (voiceRelayMode) {
+        VoiceRelayMode.IDLE -> null
+        VoiceRelayMode.CHECKING -> tr("voice.relay.checking")
+        VoiceRelayMode.TURN -> tr("voice.relay.turn")
+        VoiceRelayMode.STUN -> when (val code = voiceRelayCode) {
+            null -> tr("voice.relay.stun")
+            0 -> tr("voice.relay.fallback", tr("status.networkFailed"))
+            else -> tr("voice.relay.fallback", "HTTP $code")
+        }
+    }
+
+    /**
+     * Releases the whole mesh: leave button, room switch, stream ended or destroy.
+     * [keepRelay] keeps the freshly fetched TURN/STUN state visible while the
+     * VoiceRoomClient constructor hands the same list to every peer.
+     */
+    private fun teardownVoice(keepRelay: Boolean = false) {
         voicePendingJoin = false
+        voiceJoinPreparing = false
+        voicePendingIceServers = null
         voiceClient?.dispose()
         voiceClient = null
         voiceSnapshot = VoiceSnapshot()
+        if (!keepRelay) {
+            voiceRelayMode = VoiceRelayMode.IDLE
+            voiceRelayCode = null
+        }
     }
 
     private var chatSocketState = ""
@@ -1961,7 +2080,7 @@ class MainActivity : AppCompatActivity() {
                                 setStatus(tr("status.chatConnected", selectedStream?.title ?: tr("chat.room")))
                                 render()
                                 // A join tapped while the socket was authenticating resumes here.
-                                if (voicePendingJoin) startVoiceJoin()
+                                if (voicePendingJoin) startVoiceJoin(voicePendingIceServers ?: voiceStunFallbackIceServers())
                             }
                         }
                         "message" -> {

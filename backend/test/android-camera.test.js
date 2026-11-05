@@ -134,12 +134,12 @@ test('ScreenStreamService applies settings: landscape camera, portrait screen, p
   assert.match(stream, /encoding\.maxFramerate = videoFps/);
 });
 
-test('Android package version is bumped to 0.8.0 (versionCode 22)', () => {
+test('Android package version is bumped to 0.8.1 (versionCode 23)', () => {
   const gradle = read('android/app/build.gradle.kts');
-  assert.match(gradle, /versionCode = 22/);
-  assert.match(gradle, /versionName = "0\.8\.0"/);
+  assert.match(gradle, /versionCode = 23/);
+  assert.match(gradle, /versionName = "0\.8\.1"/);
   // The in-app header shows the same version.
-  assert.match(activity(), /text = "v0\.8\.0"/);
+  assert.match(activity(), /text = "v0\.8\.1"/);
 });
 
 test('cover picking uses ACTION_OPEN_DOCUMENT and uploads a <=2MB imageData data URL', () => {
@@ -593,9 +593,9 @@ test('v0.8.0 voice mesh: mic only after join, one audio-only PC per peer, full r
   assert.match(screen, /private val voiceMicPermission = registerForActivityResult/);
   assert.match(screen, /Manifest\.permission\.RECORD_AUDIO/);
   assert.match(screen, /private fun onJoinVoice\(\)/);
-  assert.match(screen, /private fun startVoiceJoin\(\)/);
+  assert.match(screen, /private fun startVoiceJoin\(iceServers: List<PeerConnection\.IceServer>\)/);
   assert.match(screen, /private fun leaveVoice\(\)/);
-  assert.match(screen, /private fun teardownVoice\(\)/);
+  assert.match(screen, /private fun teardownVoice\(keepRelay: Boolean = false\)/);
   assert.equal((screen.match(/VoiceRoomClient\(/g) ?? []).length, 1, 'only the join path constructs the voice client');
   assert.match(screen, /client\.join\(\)/);
   // Leaving the room releases the mesh before the WS closes.
@@ -643,6 +643,50 @@ test('v0.8.0 voice panel shows participants/speaking, mute and zh/en messages wi
     'voice.error.connectFailed', 'voice.error.auth', 'voice.error.notJoined',
     'voice.error.targetLeft', 'voice.error.invalidSignal', 'voice.error.rateLimited', 'voice.error.signal'
   ]) {
+    assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// v0.8.1: TURN relay credentials for the Android voice room
+// ---------------------------------------------------------------------------
+
+test('v0.8.1 Android voice fetches TURN credentials and falls back to STUN with a relay badge', () => {
+  const screen = activity();
+  const voice = voiceRoom();
+  const l10nSrc = l10n();
+  // Short-lived coturn REST credentials, authenticated with the user's Bearer token,
+  // are fetched right before joining voice.
+  assert.match(screen, /private fun prepareVoiceJoin\(\)/);
+  assert.match(screen, /apiRequest\("GET", "\/api\/turn-credentials", null, true\)/);
+  assert.match(screen, /private fun buildIceServers\(payload: JSONObject\?\): List<PeerConnection\.IceServer>/);
+  // urls may be an array or a single string; username/credential are shared.
+  assert.match(screen, /is JSONArray ->/);
+  assert.match(screen, /obj\.optString\("username", ""\)\.trim\(\)/);
+  assert.match(screen, /obj\.optString\("credential", ""\)\.trim\(\)/);
+  // One IceServer per TURN/STUN URL, each with setUsername/setPassword.
+  assert.match(screen, /PeerConnection\.IceServer\.builder\(url\)/);
+  assert.match(screen, /builder\.setUsername\(username\)\.setPassword\(credential\)/);
+  assert.match(screen, /startsWith\("turn:"\)/);
+  // 503 / network / auth failure falls back to STUN and keeps voice usable.
+  assert.match(screen, /private fun voiceStunFallbackIceServers\(\)/);
+  assert.match(screen, /stun:stun\.l\.google\.com:19302/);
+  assert.match(screen, /VoiceRelayMode\.STUN/);
+  assert.match(screen, /voiceRelayCode = if \(result\.code in 200\.\.299\) null else result\.code/);
+  // The fetched list is handed to VoiceRoomClient; RTCConfiguration reuses it for
+  // every mesh peer (no hard-coded STUN inside the voice client any more).
+  assert.match(screen, /VoiceRoomClient\(\s*\n\s*this,\s*\n\s*iceServers,/);
+  assert.match(voice, /private val iceServers: List<PeerConnection\.IceServer>,/);
+  assert.match(voice, /PeerConnection\.RTCConfiguration\(iceServers\)/);
+  assert.doesNotMatch(voice, /stun:stun\.l\.google\.com|stun:stun\.cloudflare\.com/);
+  assert.doesNotMatch(voice, /STUN_URL/);
+  // The relay state is rendered in the voice card (TURN vs direct/STUN), bilingual.
+  assert.match(screen, /private fun voiceRelayText\(\): String\?/);
+  assert.match(screen, /tr\("voice\.relay\.checking"\)/);
+  assert.match(screen, /tr\("voice\.relay\.turn"\)/);
+  assert.match(screen, /tr\("voice\.relay\.stun"\)/);
+  assert.match(screen, /tr\("voice\.relay\.fallback"/);
+  for (const key of ['voice.relay.checking', 'voice.relay.turn', 'voice.relay.stun', 'voice.relay.fallback']) {
     assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
   }
 });
