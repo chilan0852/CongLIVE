@@ -1,4 +1,4 @@
-# CongLive Android v0.8.1 — 独立直播间 + 全双工语音房（TURN 中继）+ 1080p60 容量门控 + 延迟监控 + 域名服务器
+# CongLive Android v0.8.3 — 独立直播间 + 语音房（TURN）+ 系统音频混音（实验）+ 1080p60 容量门控 + 延迟监控 + 域名服务器
 
 Kotlin 原生 Android 客户端。实时直播推流由 WHIP 完成，实时观看使用 WHEP；保留账号、个人直播、WebSocket 弹幕和 MP4 录像播放。
 
@@ -153,3 +153,13 @@ gradle :app:assembleDebug
 - **失败回退**：权限 / MediaProjection / AudioPlaybackCapture / 反射任一步失败都会发送 `system_audio_fallback` 状态并在通知/开播页显示原因，继续使用原麦克风路径；停止时由 ADM 释放注入的 record，服务再做一次带状态检查的兜底释放，避免重复释放。
 - **保留**：麦克风开播、摄像头预览、语音房/TURN、1080p60、双语与图标全部不变。
 - **限制**：无 Android 设备/模拟器实测；AudioPlaybackCapture 需要源 App 允许被录制，部分 App（如受保护音频）会静音，具体以真机验证为准。
+
+## v0.8.3 新增（麦克风 + 系统音频混音 · 实验）
+
+- **MixedAudioRecord**：新增 `MixedAudioRecord.kt`，继承 `android.media.AudioRecord`（`super` 为麦克风源），内部再持有一个 AudioPlaybackCapture 的 system AudioRecord；重写 `read(ByteBuffer,int)`（及 `read(byte[],...)` 转调）、`startRecording` / `stop` / `release` / `getState` / `getRecordingState`，保证两路录音生命周期与幂等释放。
+- **16-bit saturating 混音**：每次 read 先阻塞读麦克风，再以 `READ_NON_BLOCKING` 排空 system 音频，按 `mic*0.7 + system*0.7` 计算并 clamp 到 [-32768, 32767]（soft clip）；system 无数据、启动失败或读失败时只返回麦克风样本，并上报一次回退状态。
+- **Service 注入**：`tryEnableSystemAudioCapture` 仍用 MediaProjection 构造 48 kHz 单声道 PCM16 的 system AudioRecord，但包成 `MixedAudioRecord` 后反射注入 `JavaAudioDeviceModule.audioInput.audioRecord`，并释放 prewarm 生成的默认麦克风 record；ADM 输入格式保持 48 kHz 单声道对齐。
+- **UI**：开播页开关改为「系统音频混音（实验）」，提示「混入系统/应用播放音频，仍保留麦克风」；仅屏幕模式可用，持久化键仍为 `audio_system_capture`。
+- **失败回退**：权限 / MediaProjection / AudioPlaybackCapture / 反射 / system 录音失败 → 上报 `system_audio_fallback`（中英），继续以纯麦克风推流；停止时由 ADM 释放，服务按状态兜底释放避免重复。
+- **版本**：versionCode 25 / versionName 0.8.3；TURN 语音房、1080p60、双语、图标、Live2D 本地模型包全部保留。
+- **限制**：无真机/模拟器，未实测混音音质与回退；AudioPlaybackCapture 受源 App 允许录制策略限制（受保护音频会静音）。

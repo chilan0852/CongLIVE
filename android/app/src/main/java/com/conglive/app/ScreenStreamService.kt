@@ -372,13 +372,15 @@ class ScreenStreamService : Service() {
     }
 
     /**
-     * v0.8.2 (experimental): capture the device playback audio with
-     * AudioPlaybackCapture and let WebRTC send that instead of the microphone.
+     * v0.8.3 (experimental): mix the microphone with the device playback audio
+     * captured through AudioPlaybackCapture, so WebRTC sends both the speaker and
+     * the app/system sound.
      *
-     * The AudioRecord is injected into the private `audioRecord` field of
-     * JavaAudioDeviceModule.audioInput (WebRtcAudioRecord), so the normal WebRTC
-     * audio path keeps working. Permission / MediaProjection / AudioPlaybackCapture /
-     * reflection failures are reported and leave the microphone path untouched.
+     * A [MixedAudioRecord] (super = microphone, system = playback capture) is
+     * injected into the private `audioRecord` field of JavaAudioDeviceModule.audioInput
+     * (WebRtcAudioRecord), so the normal WebRTC audio path keeps working. Permission /
+     * MediaProjection / AudioPlaybackCapture / reflection failures are reported and
+     * leave the plain microphone path untouched.
      */
     private fun tryEnableSystemAudioCapture() {
         val screen = capturer as? ScreenCapturerAndroid
@@ -386,7 +388,8 @@ class ScreenStreamService : Service() {
             sendStatus(tr("svc.systemAudioFallback", tr("svc.systemAudioNoProjection")), STATUS_SYSTEM_AUDIO_FALLBACK)
             return
         }
-        var pending: AudioRecord? = null
+        var systemRecord: AudioRecord? = null
+        var mixedRecord: MixedAudioRecord? = null
         try {
             val projection = screen.getMediaProjection()
                 ?: throw IllegalStateException(tr("svc.systemAudioNoProjection"))
@@ -407,29 +410,46 @@ class ScreenStreamService : Service() {
                 AudioFormat.ENCODING_PCM_16BIT
             )
             if (minBuffer <= 0) throw IllegalStateException(tr("svc.systemAudioBuffer", minBuffer))
-            val record = AudioRecord.Builder()
+            val playbackRecord = AudioRecord.Builder()
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(minBuffer * 2)
                 .setAudioPlaybackCaptureConfig(configuration)
                 .build()
-            pending = record
-            if (record.state != AudioRecord.STATE_INITIALIZED) {
+            systemRecord = playbackRecord
+            if (playbackRecord.state != AudioRecord.STATE_INITIALIZED) {
                 throw IllegalStateException(tr("svc.systemAudioNotInitialized"))
             }
             // prewarmRecording() allocates WebRtcAudioRecord's byteBuffer first; injecting
             // before this point would make initRecordingIfNeeded() skip that allocation.
             if (!adm.prewarmRecording()) throw IllegalStateException(tr("svc.systemAudioPrewarm"))
-            if (!injectAudioRecordIntoAdm(adm, record)) {
+            // v0.8.3: inject the mic + system-audio mixer (super = microphone) instead of
+            // the pure playback-capture recorder; it falls back to mic samples on failure.
+            val mixed = MixedAudioRecord(
+                SYSTEM_AUDIO_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minBuffer * 2,
+                playbackRecord
+            ) { reason ->
+                sendStatus(tr("svc.systemAudioMixFallback", reason), STATUS_SYSTEM_AUDIO_FALLBACK)
+            }
+            mixedRecord = mixed
+            if (!injectAudioRecordIntoAdm(adm, mixed)) {
                 throw IllegalStateException(tr("svc.systemAudioReflection"))
             }
-            // Ownership moved to WebRtcAudioRecord (it releases the record on stop).
-            pending = null
-            injectedSystemAudioRecord = record
+            // Ownership moved to WebRtcAudioRecord (it releases the recorder on stop).
+            systemRecord = null
+            mixedRecord = null
+            injectedSystemAudioRecord = mixed
             systemAudioInjected = true
-            sendStatus(tr("svc.systemAudioEnabled", SYSTEM_AUDIO_SAMPLE_RATE), STATUS_SYSTEM_AUDIO)
+            sendStatus(tr("svc.systemAudioMixEnabled", SYSTEM_AUDIO_SAMPLE_RATE), STATUS_SYSTEM_AUDIO)
         } catch (error: Exception) {
             try {
-                pending?.release()
+                mixedRecord?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                systemRecord?.release()
             } catch (_: Exception) {
             }
             injectedSystemAudioRecord = null
@@ -444,7 +464,7 @@ class ScreenStreamService : Service() {
     /**
      * Reflective injection: JavaAudioDeviceModule keeps the recorder in its
      * `audioInput` (WebRtcAudioRecord) object; its private `audioRecord` field is
-     * swapped from the microphone recorder to the playback-capture recorder.
+     * swapped from the prewarmed microphone recorder to the mixed recorder.
      */
     private fun injectAudioRecordIntoAdm(adm: JavaAudioDeviceModule, record: AudioRecord): Boolean {
         return try {
@@ -466,7 +486,7 @@ class ScreenStreamService : Service() {
         }
     }
 
-    /** v0.8.2: last-resort cleanup; WebRtcAudioRecord usually releases it on stop. */
+    /** v0.8.3: last-resort cleanup; WebRtcAudioRecord usually releases it on stop. */
     private fun releaseInjectedSystemAudioRecord() {
         val record = injectedSystemAudioRecord
         injectedSystemAudioRecord = null

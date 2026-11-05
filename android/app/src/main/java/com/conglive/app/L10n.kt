@@ -413,29 +413,29 @@ object L10n {
                 "Android will ask for screen-sharing permission when you start."
             ),
         // v0.8.2: experimental AudioPlaybackCapture toggle (screen sharing only).
-        "broadcast.systemAudioTitle" to ("系统音频（实验）" to "System audio (experimental)"),
+        "broadcast.systemAudioTitle" to ("系统音频混音（实验）" to "System audio mix (experimental)"),
         "broadcast.systemAudioOn" to (
-            "系统内录：已开启（替换麦克风）" to
-                "System audio: on (replaces microphone)"
+            "系统音频混音：已开启（麦克风 + 系统音频）" to
+                "System audio mix: on (microphone + system audio)"
             ),
         "broadcast.systemAudioOff" to (
-            "系统内录：关闭（使用麦克风）" to
-                "System audio: off (uses microphone)"
+            "系统音频混音：关闭（仅麦克风）" to
+                "System audio mix: off (microphone only)"
             ),
         "broadcast.systemAudioBody" to (
-            "开启后屏幕直播会尝试用 AudioPlaybackCapture 采集设备正在播放的声音并替换麦克风；部分 App 禁止被录制，部分机型会失败，失败时自动回退麦克风。" to
-                "When enabled, screen streaming tries to capture the audio playing on the device with AudioPlaybackCapture and replaces the microphone. Some apps block capture and some devices fail; failures fall back to the microphone automatically."
+            "开启后屏幕直播会同时采集麦克风与设备/应用播放的音频并混音（16-bit 混音，仍保留麦克风）；部分 App 禁止被录制，失败时会自动回退为仅麦克风。" to
+                "When enabled, screen streaming mixes the microphone with the audio playing on the device (16-bit mix, microphone kept). Some apps block capture; failures fall back to microphone-only automatically."
             ),
         "broadcast.systemAudioEnabledHint" to (
-            "已开启系统内录（实验）；无法采集时会自动回退麦克风" to
-                "System audio capture enabled (experimental); falls back to the microphone if capture fails"
+            "已开启系统音频混音（实验）：麦克风 + 系统音频；无法采集系统声音时自动回退仅麦克风" to
+                "System audio mix enabled (experimental): microphone + system audio; falls back to microphone-only if system capture fails"
             ),
         "broadcast.systemAudioDisabledHint" to (
-            "已关闭系统内录，开播将使用麦克风" to
-                "System audio capture disabled; streaming will use the microphone"
+            "已关闭系统音频混音，开播仅使用麦克风" to
+                "System audio mix disabled; streaming will use the microphone only"
             ),
         "broadcast.audioSource" to ("音频来源" to "Audio source"),
-        "broadcast.audioSourceSystem" to ("系统内录（实验）" to "System audio (experimental)"),
+        "broadcast.audioSourceSystem" to ("麦克风 + 系统音频混音（实验）" to "Microphone + system audio mix (experimental)"),
         "broadcast.audioSourceMic" to ("麦克风" to "Microphone"),
         "broadcast.titleHint" to ("直播标题" to "Stream title"),
         "broadcast.create" to ("创建直播并获取推流地址" to "Create stream and get publishing URL"),
@@ -644,12 +644,20 @@ object L10n {
         "svc.videoSourceMissing" to ("视频源尚未初始化" to "The video source is not initialized"),
         // v0.8.2: experimental AudioPlaybackCapture (screen sharing).
         "svc.systemAudioEnabled" to (
-            "系统内录已启用（实验）：%s Hz 单声道，替换麦克风音频" to
-                "System audio capture enabled (experimental): %s Hz mono, replacing the microphone"
+            "系统音频混音已启用（实验）：麦克风 + 系统音频，%s Hz 单声道" to
+                "System audio mix enabled (experimental): microphone + system audio, %s Hz mono"
+            ),
+        "svc.systemAudioMixEnabled" to (
+            "系统音频混音已启用（实验）：麦克风 + 系统音频，%s Hz 单声道" to
+                "System audio mix enabled (experimental): microphone + system audio, %s Hz mono"
             ),
         "svc.systemAudioFallback" to (
-            "系统内录不可用，已回退麦克风：%s" to
-                "System audio capture unavailable; fell back to the microphone: %s"
+            "系统音频混音不可用，已回退仅麦克风：%s" to
+                "System audio mix unavailable; fell back to microphone-only: %s"
+            ),
+        "svc.systemAudioMixFallback" to (
+            "系统音频混音已回退仅麦克风：%s" to
+                "System audio mix fell back to microphone-only: %s"
             ),
         "svc.systemAudioNoProjection" to (
             "无法获取 MediaProjection" to

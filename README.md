@@ -85,7 +85,7 @@ npm run build      # 或 npm run dev
 ### Android APK 下载
 
 - [最新 Release](https://github.com/chilan0852/CongLIVE/releases/latest)
-- `v0.8.2` Android TURN 语音 + 系统内录 APK：`com.conglive.app` / code 24 / minSdk 29 / targetSdk 34
+- `v0.8.3` Android TURN 语音 + 麦克风/系统音频混音 APK：`com.conglive.app` / code 25 / minSdk 29 / targetSdk 34
 - 仓库不包含 Live2D 模型；APK 仅用于测试安装。
 
 ### Android

@@ -134,12 +134,12 @@ test('ScreenStreamService applies settings: landscape camera, portrait screen, p
   assert.match(stream, /encoding\.maxFramerate = videoFps/);
 });
 
-test('Android package version is bumped to 0.8.2 (versionCode 24)', () => {
+test('Android package version is bumped to 0.8.3 (versionCode 25)', () => {
   const gradle = read('android/app/build.gradle.kts');
-  assert.match(gradle, /versionCode = 24/);
-  assert.match(gradle, /versionName = "0\.8\.2"/);
+  assert.match(gradle, /versionCode = 25/);
+  assert.match(gradle, /versionName = "0\.8\.3"/);
   // The in-app header shows the same version.
-  assert.match(activity(), /text = "v0\.8\.2"/);
+  assert.match(activity(), /text = "v0\.8\.3"/);
 });
 
 test('cover picking uses ACTION_OPEN_DOCUMENT and uploads a <=2MB imageData data URL', () => {
@@ -797,4 +797,61 @@ test('v0.8.2 screen streaming can inject AudioPlaybackCapture system audio with 
   ]) {
     assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// v0.8.3: microphone + system-audio mixing (MixedAudioRecord)
+// ---------------------------------------------------------------------------
+
+test('v0.8.3 MixedAudioRecord mixes microphone + system audio with a mic-only fallback', () => {
+  const screen = activity();
+  const stream = service();
+  const mixed = read('android/app/src/main/java/com/conglive/app/MixedAudioRecord.kt');
+  const l10nSrc = l10n();
+  // 1) Subclass AudioRecord whose super recorder is the microphone; embeds the
+  //    AudioPlaybackCapture system recorder.
+  assert.match(mixed, /class MixedAudioRecord\(/);
+  assert.match(mixed, /\) : AudioRecord\(\s*MediaRecorder\.AudioSource\.MIC,/);
+  assert.match(mixed, /private val systemRecord: AudioRecord\?/);
+  // 2) 16-bit mono mix: 0.7 gains and a saturating soft clip.
+  assert.match(mixed, /const val MIC_GAIN = 0\.7f/);
+  assert.match(mixed, /const val SYSTEM_GAIN = 0\.7f/);
+  assert.match(mixed, /private const val PCM_MIN = -32768/);
+  assert.match(mixed, /private const val PCM_MAX = 32767/);
+  assert.match(mixed, /coerceIn\(PCM_MIN, PCM_MAX\)/);
+  assert.match(mixed, /mic \* MIC_GAIN \+ system \* SYSTEM_GAIN/);
+  // 3) Required overrides: ByteBuffer + byte[] reads, dual lifecycle, idempotent release.
+  assert.match(mixed, /override fun read\(audioBuffer: ByteBuffer, sizeInBytes: Int\): Int/);
+  assert.match(mixed, /override fun read\(audioBuffer: ByteBuffer, sizeInBytes: Int, readMode: Int\): Int/);
+  assert.match(mixed, /override fun read\(audioData: ByteArray, offsetInBytes: Int, sizeInBytes: Int\): Int/);
+  assert.match(mixed, /override fun read\(audioData: ByteArray, offsetInBytes: Int, sizeInBytes: Int, readMode: Int\): Int/);
+  assert.match(mixed, /override fun startRecording\(\)/);
+  assert.match(mixed, /override fun startRecording\(syncEvent: MediaSyncEvent\)/);
+  assert.match(mixed, /override fun stop\(\)/);
+  assert.match(mixed, /override fun release\(\)/);
+  assert.match(mixed, /override fun getState\(\): Int = super\.getState\(\)/);
+  assert.match(mixed, /override fun getRecordingState\(\): Int = super\.getRecordingState\(\)/);
+  assert.match(mixed, /released\.compareAndSet\(false, true\)/);
+  // 4) System samples are drained non-blocking; no-data/failure keeps microphone-only.
+  assert.match(mixed, /READ_NON_BLOCKING/);
+  assert.match(mixed, /readSystemSamples/);
+  assert.match(mixed, /systemUnavailable/);
+  assert.match(mixed, /markSystemUnavailable/);
+  // 5) Service wraps the playback-capture recorder in MixedAudioRecord and injects it,
+  //    releasing the prewarmed default microphone recorder.
+  assert.match(stream, /val mixed = MixedAudioRecord\(/);
+  assert.match(stream, /minBuffer \* 2,\s*\n\s*playbackRecord/);
+  assert.match(stream, /injectAudioRecordIntoAdm\(adm, mixed\)/);
+  assert.match(stream, /val previous = audioRecordField\.get\(audioInput\) as\? AudioRecord/);
+  assert.match(stream, /previous\?\.release\(\)/);
+  assert.match(stream, /tr\("svc\.systemAudioMixEnabled", SYSTEM_AUDIO_SAMPLE_RATE\)/);
+  assert.match(stream, /tr\("svc\.systemAudioMixFallback", reason\)/);
+  // 6) UI copy is "system audio mix (microphone + system)"; screen-only + persistence unchanged.
+  assert.match(screen, /tr\("broadcast\.systemAudioTitle"\)/);
+  assert.match(l10nSrc, /"broadcast\.systemAudioTitle" to \("系统音频混音（实验）"/);
+  assert.match(l10nSrc, /"broadcast\.audioSourceSystem" to \("麦克风 \+ 系统音频混音（实验）"/);
+  assert.match(l10nSrc, /"svc\.systemAudioMixEnabled" to \(/);
+  assert.match(l10nSrc, /"svc\.systemAudioMixFallback" to \(/);
+  assert.match(screen, /PREF_SYSTEM_AUDIO = "audio_system_capture"/);
+  assert.match(screen, /videoSourceMode == "screen" && systemAudioCaptureEnabled/);
 });
