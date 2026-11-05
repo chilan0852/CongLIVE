@@ -52,6 +52,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -85,6 +86,13 @@ private data class Recording(
     val playUrl: String
 )
 
+/** v0.8.2: result of copying a picked Live2D model zip into cacheDir. */
+private data class Live2DZipCopy(
+    val file: File? = null,
+    val tooLarge: Boolean = false,
+    val failed: Boolean = false
+)
+
 private data class ChatMessage(
     val id: String,
     val username: String,
@@ -102,6 +110,13 @@ class MainActivity : AppCompatActivity() {
         private const val COVER_PREF_PREFIX = "cover_"
         /** v0.7.9: the standalone room polls GET /api/streams/:id; the lobby never does. */
         private const val ROOM_POLL_INTERVAL_MS = 5_000L
+
+        /** v0.8.2: experimental AudioPlaybackCapture toggle (screen sharing only, default off). */
+        private const val PREF_SYSTEM_AUDIO = "audio_system_capture"
+
+        /** v0.8.2: Live2D model packages are copied to cacheDir; cap the copy size. */
+        private const val LIVE2D_ZIP_MAX_BYTES = 128L * 1024L * 1024L
+        private const val LIVE2D_ZIP_MAX_MB = 128
 
         // v0.7.6 dark gradient theme.
         private val BG_TOP = 0xFF060A14.toInt()
@@ -163,6 +178,8 @@ class MainActivity : AppCompatActivity() {
     /** Empty means the localized idle text from [renderBroadcast] is shown. */
     private var liveStatusMessage = ""
     private var videoSourceMode = "screen"
+    /** v0.8.2: experimental system-audio capture (default off, screen sharing only). */
+    private var systemAudioCaptureEnabled = false
     private var cameraFacingFront = true
     private var cameraStreamingActive = false
     private var broadcastActive = false
@@ -216,6 +233,8 @@ class MainActivity : AppCompatActivity() {
     private var live2DStateView: TextView? = null
     private var live2DModelUrl = ""
     private var live2DStatusMessage = ""
+    /** v0.8.2: last picked local .zip model package, already copied into cacheDir. */
+    private var live2DModelZip: File? = null
 
     /** Convenience accessor for the zh/en dictionary used by every visible string. */
     private fun tr(key: String, vararg args: Any?): String = L10n.t(lang, key, *args)
@@ -279,6 +298,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * v0.8.2: ACTION_OPEN_DOCUMENT for a Live2D model `.zip` package. The WebView
+     * can only read `file://` URLs, so the content URI is copied into cacheDir
+     * (live2d-model-<ts>.zip) right away — no storage permission required.
+     */
+    private val live2DZipPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) {
+            setStatus(tr("live2d.zipCancelled"))
+        } else {
+            setStatus(tr("live2d.zipCopying"))
+            executor.execute {
+                val copy = try {
+                    copyLive2DZipToCache(uri)
+                } catch (_: Exception) {
+                    Live2DZipCopy(failed = true)
+                }
+                runOnUiThread {
+                    when {
+                        copy.tooLarge -> {
+                            val message = tr("live2d.zipTooLarge", LIVE2D_ZIP_MAX_MB)
+                            live2DStatusMessage = message
+                            live2DStateView?.text = message
+                            setStatus(message)
+                        }
+                        copy.file == null -> {
+                            val message = tr("live2d.zipCopyFailed")
+                            live2DStatusMessage = message
+                            live2DStateView?.text = message
+                            setStatus(message)
+                        }
+                        else -> {
+                            // The previous branches handled tooLarge/failed, so file is set.
+                            val file = copy.file
+                            val previous = live2DModelZip
+                            live2DModelZip = file
+                            if (previous != null && previous != file) previous.delete()
+                            val viewer = live2DViewer
+                            if (viewer == null) {
+                                // Not on the mascot tab yet; load it when the card is built.
+                                setStatus(tr("live2d.zipCopied", file.name))
+                            } else {
+                                viewer.loadLocalZip(file)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val message = intent?.getStringExtra(ScreenStreamService.EXTRA_MESSAGE) ?: tr("status.updated")
@@ -329,6 +398,7 @@ class MainActivity : AppCompatActivity() {
         currentUsername = prefs.getString("username", "") ?: ""
         videoResolution = VideoSettings.resolution(prefs.getString(VideoSettings.KEY_RESOLUTION, VideoSettings.DEFAULT_RESOLUTION_ID))
         videoFps = VideoSettings.normalizedFps(prefs.getInt(VideoSettings.KEY_FPS, VideoSettings.DEFAULT_FPS))
+        systemAudioCaptureEnabled = prefs.getBoolean(PREF_SYSTEM_AUDIO, false)
         // v0.7.7: the dictionary language defaults to the system language.
         lang = L10n.read(this)
         CameraPreviewBridge.setLanguage(lang)
@@ -421,7 +491,7 @@ class MainActivity : AppCompatActivity() {
         })
         header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
-            text = "v0.8.1"
+            text = "v0.8.2"
             textSize = 10.5f
             setTextColor(0xFFD9CEFF.toInt())
             gravity = Gravity.CENTER
@@ -1357,6 +1427,28 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             card.addView(body(tr("broadcast.screenPermissionBody")))
+            // v0.8.2: experimental AudioPlaybackCapture. Off by default; when enabled
+            // the service replaces the microphone with the device playback audio.
+            card.addView(sectionLabel(tr("broadcast.systemAudioTitle")))
+            card.addView(
+                actionButton(
+                    if (systemAudioCaptureEnabled) tr("broadcast.systemAudioOn") else tr("broadcast.systemAudioOff"),
+                    systemAudioCaptureEnabled
+                ) {
+                    if (broadcastActive) {
+                        setStatus(tr("broadcast.stopFirstToSwitch"))
+                    } else {
+                        systemAudioCaptureEnabled = !systemAudioCaptureEnabled
+                        persistSystemAudioSetting()
+                        setStatus(
+                            if (systemAudioCaptureEnabled) tr("broadcast.systemAudioEnabledHint")
+                            else tr("broadcast.systemAudioDisabledHint")
+                        )
+                        render()
+                    }
+                }.apply { isEnabled = !broadcastActive }
+            )
+            card.addView(body(tr("broadcast.systemAudioBody")))
         }
         val titleInput = input(tr("broadcast.titleHint")).apply { setText(draftTitleValue()) }
         titleInput.addTextChangedListener(SimpleTextWatcher { draftTitle = it })
@@ -1371,6 +1463,13 @@ class MainActivity : AppCompatActivity() {
                 )
             )
             card.addView(infoRow(tr("broadcast.qualityLabel"), "${videoResolution.label} · ${bitrateLabel(VideoSettings.effectiveBitrate(videoResolution, videoFps))} · $videoFps fps"))
+            card.addView(
+                infoRow(
+                    tr("broadcast.audioSource"),
+                    if (videoSourceMode == "screen" && systemAudioCaptureEnabled) tr("broadcast.audioSourceSystem")
+                    else tr("broadcast.audioSourceMic")
+                )
+            )
             card.addView(infoRow(tr("broadcast.publishPath"), createdPublishPath))
             if (createdStreamId > 0L) {
                 card.addView(sectionLabel(tr("broadcast.coverTitle")))
@@ -1564,7 +1663,11 @@ class MainActivity : AppCompatActivity() {
                     setStatus(message)
                 }
             }
-        ).also { live2DViewer = it }
+        ).also { created ->
+            live2DViewer = created
+            // v0.8.2: if a model package was already picked, load it right away.
+            live2DModelZip?.let { zip -> created.loadLocalZip(zip) }
+        }
 
         val webBox = FrameLayout(this).apply {
             background = rounded(PANEL_DEEP, 18, stroke = true)
@@ -1574,6 +1677,10 @@ class MainActivity : AppCompatActivity() {
         (viewer.webView.parent as? ViewGroup)?.removeView(viewer.webView)
         webBox.addView(viewer.webView, FrameLayout.LayoutParams(-1, -1))
         card.addView(webBox, LinearLayout.LayoutParams(-1, dp(340)).apply { topMargin = dp(10) })
+
+        // v0.8.2: pick a local .zip model package (zip is copied into cacheDir and
+        // unzipped by viewer.html with JSZip; the WebView never sees content://).
+        card.addView(actionButton(tr("live2d.pickZip"), true) { pickLive2DZip() })
 
         val urlInput = input(tr("live2d.urlHint"), false)
         if (live2DModelUrl.isNotBlank()) urlInput.setText(live2DModelUrl)
@@ -1592,6 +1699,48 @@ class MainActivity : AppCompatActivity() {
         card.addView(state)
         card.addView(actionButton(tr("live2d.reload"), false) { viewer.reload() })
         content.addView(card, cardParams())
+    }
+
+    /** v0.8.2: opens the system document picker filtered to zip packages. */
+    private fun pickLive2DZip() {
+        setStatus(tr("live2d.zipChoose"))
+        live2DZipPicker.launch(arrayOf("application/zip", "application/octet-stream"))
+    }
+
+    /**
+     * v0.8.2: copies the picked document into cacheDir as live2d-model-<ts>.zip.
+     * Runs on [executor]; the WebView can only read `file://` URLs, so a plain
+     * copy is what turns the `content://` URI into something viewer.html can fetch.
+     */
+    private fun copyLive2DZipToCache(uri: Uri): Live2DZipCopy {
+        val input = contentResolver.openInputStream(uri) ?: return Live2DZipCopy(failed = true)
+        val target = File(cacheDir, "live2d-model-" + System.currentTimeMillis() + ".zip")
+        var total = 0L
+        try {
+            input.use { source ->
+                target.outputStream().use { sink ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = source.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        if (total > LIVE2D_ZIP_MAX_BYTES) {
+                            target.delete()
+                            return Live2DZipCopy(tooLarge = true)
+                        }
+                        sink.write(buffer, 0, read)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            target.delete()
+            return Live2DZipCopy(failed = true)
+        }
+        if (target.length() <= 0L) {
+            target.delete()
+            return Live2DZipCopy(failed = true)
+        }
+        return Live2DZipCopy(file = target)
     }
 
     // ---------------------------------------------------------------------
@@ -1891,6 +2040,19 @@ class MainActivity : AppCompatActivity() {
         // service clamps again defensively before it touches the RTP sender.
         intent.putExtra(ScreenStreamService.EXTRA_VIDEO_BITRATE, VideoSettings.effectiveBitrate(videoResolution, videoFps))
         intent.putExtra(ScreenStreamService.EXTRA_VIDEO_FPS, videoFps)
+        // v0.8.2: experimental system audio is screen-share only; the service falls
+        // back to the microphone when AudioPlaybackCapture is unavailable.
+        intent.putExtra(
+            ScreenStreamService.EXTRA_SYSTEM_AUDIO,
+            videoSourceMode == "screen" && systemAudioCaptureEnabled
+        )
+    }
+
+    /** v0.8.2: persists the experimental system-audio toggle (default off). */
+    private fun persistSystemAudioSetting() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean(PREF_SYSTEM_AUDIO, systemAudioCaptureEnabled)
+            .apply()
     }
 
     private fun videoQualitySummary(): String {

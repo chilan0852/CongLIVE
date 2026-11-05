@@ -134,12 +134,12 @@ test('ScreenStreamService applies settings: landscape camera, portrait screen, p
   assert.match(stream, /encoding\.maxFramerate = videoFps/);
 });
 
-test('Android package version is bumped to 0.8.1 (versionCode 23)', () => {
+test('Android package version is bumped to 0.8.2 (versionCode 24)', () => {
   const gradle = read('android/app/build.gradle.kts');
-  assert.match(gradle, /versionCode = 23/);
-  assert.match(gradle, /versionName = "0\.8\.1"/);
+  assert.match(gradle, /versionCode = 24/);
+  assert.match(gradle, /versionName = "0\.8\.2"/);
   // The in-app header shows the same version.
-  assert.match(activity(), /text = "v0\.8\.1"/);
+  assert.match(activity(), /text = "v0\.8\.2"/);
 });
 
 test('cover picking uses ACTION_OPEN_DOCUMENT and uploads a <=2MB imageData data URL', () => {
@@ -191,6 +191,46 @@ test('Live2D 看板娘 entry loads a local WebView page with CDN pixi.js and a m
   assert.match(html, /window\.showLive2D/);
   // The Live2D companion is UI only; it must never be composited into WebRTC.
   assert.doesNotMatch(viewer, /PeerConnection|addTrack|VideoTrack/);
+});
+
+test('v0.8.2 Live2D 看板娘 picks a local model zip and loads it through JSZip blob URLs', () => {
+  const screen = activity();
+  const viewer = live2dViewer();
+  const html = read('android/app/src/main/assets/live2d/viewer.html');
+  // 看板娘页新增「选择模型包」按钮；用系统文件选择器选 zip（兼容 octet-stream）。
+  assert.match(screen, /actionButton\(tr\("live2d\.pickZip"\), true\)/);
+  assert.match(l10n(), /"live2d\.pickZip" to \(/);
+  assert.match(screen, /private val live2DZipPicker = registerForActivityResult\(ActivityResultContracts\.OpenDocument\(\)\)/);
+  assert.match(screen, /live2DZipPicker\.launch\(arrayOf\("application\/zip", "application\/octet-stream"\)\)/);
+  // content URI 被复制到 cacheDir 的 live2d-model-<ts>.zip，WebView 读到的是 file:// URL。
+  assert.match(screen, /copyLive2DZipToCache\(uri: Uri\)/);
+  assert.match(screen, /cacheDir, "live2d-model-" \+ System\.currentTimeMillis\(\) \+ "\.zip"/);
+  assert.match(screen, /viewer\.loadLocalZip\(file\)/);
+  // Live2DViewer：加载 file:///android_asset/live2d/viewer.html?zip=<encoded file url>，
+  // 并开启 file:// 页面之间的访问权限；URL 输入方式继续保留。
+  assert.match(viewer, /fun loadLocalZip\(file: File\)/);
+  assert.match(viewer, /ASSET_URL \+ "\?" \+ ZIP_QUERY \+ "=" \+ Uri\.encode\(fileUrl\)/);
+  assert.match(viewer, /settings\.allowFileAccessFromFileURLs = true/);
+  assert.match(viewer, /settings\.allowUniversalAccessFromFileURLs = true/);
+  assert.match(viewer, /fun loadModel\(rawUrl: String\)/);
+  assert.match(viewer, /window\.loadLive2DModel/);
+  // viewer.html：JSZip CDN + 读取 zip 参数 → 解压 → blob URL → 改写 FileReferences。
+  assert.match(html, /jszip@/);
+  assert.match(html, /JSZip\.loadAsync/);
+  assert.match(html, /window\.loadLive2DZip = function/);
+  assert.match(html, /URL\.createObjectURL/);
+  assert.match(html, /URL\.revokeObjectURL/);
+  assert.match(html, /get\('zip'\)/);
+  assert.match(html, /FileReferences/);
+  assert.match(html, /window\.loadLive2DModel\(modelJsonUrl\)/);
+  // pixi 6 的 legacy url.resolve 会破坏 blob: URL，用 URL 标准替换后再交给 pixi。
+  assert.match(html, /patchPixiResolve/);
+  assert.match(html, /PIXI\.utils\.url\.resolve = function/);
+  // 错误提示：没有模型文件 / 读取失败 / JSZip CDN 失败（中英双语）。
+  assert.match(html, /zipNoModel/);
+  assert.match(html, /zipReadFailed/);
+  assert.match(html, /jszipMissing/);
+  assert.match(html, /jszip@[0-9.]+\/dist\/jszip\.min\.js[\s\S]*?__congliveJszipError/);
 });
 
 // ---------------------------------------------------------------------------
@@ -687,6 +727,74 @@ test('v0.8.1 Android voice fetches TURN credentials and falls back to STUN with 
   assert.match(screen, /tr\("voice\.relay\.stun"\)/);
   assert.match(screen, /tr\("voice\.relay\.fallback"/);
   for (const key of ['voice.relay.checking', 'voice.relay.turn', 'voice.relay.stun', 'voice.relay.fallback']) {
+    assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// v0.8.2: experimental AudioPlaybackCapture system audio for screen streaming
+// ---------------------------------------------------------------------------
+
+test('v0.8.2 screen streaming can inject AudioPlaybackCapture system audio with a microphone fallback', () => {
+  const screen = activity();
+  const stream = service();
+  const l10nSrc = l10n();
+  // 1) Broadcast page: persisted, default-off toggle that only appears for screen mode.
+  assert.match(screen, /private var systemAudioCaptureEnabled = false/);
+  assert.match(screen, /PREF_SYSTEM_AUDIO = "audio_system_capture"/);
+  assert.match(screen, /prefs\.getBoolean\(PREF_SYSTEM_AUDIO, false\)/);
+  assert.match(screen, /private fun persistSystemAudioSetting\(\)/);
+  assert.match(screen, /putBoolean\(PREF_SYSTEM_AUDIO, systemAudioCaptureEnabled\)/);
+  assert.match(screen, /tr\("broadcast\.systemAudioOn"\)/);
+  assert.match(screen, /tr\("broadcast\.systemAudioOff"\)/);
+  assert.match(screen, /tr\("broadcast\.systemAudioBody"\)/);
+  // 2) The Service Intent extra is sent only for screen sharing.
+  assert.match(screen, /ScreenStreamService\.EXTRA_SYSTEM_AUDIO,\s*\n\s*videoSourceMode == "screen" && systemAudioCaptureEnabled/);
+  assert.match(stream, /const val EXTRA_SYSTEM_AUDIO = "system_audio"/);
+  assert.match(stream, /getBooleanExtra\(EXTRA_SYSTEM_AUDIO, false\) && !cameraMode/);
+  // 3) AudioPlaybackCapture configuration + 48 kHz mono PCM16 AudioRecord.
+  assert.match(stream, /AudioPlaybackCaptureConfiguration\.Builder\(projection\)/);
+  assert.match(stream, /addMatchingUsage\(AudioAttributes\.USAGE_MEDIA\)/);
+  assert.match(stream, /AudioFormat\.ENCODING_PCM_16BIT/);
+  assert.match(stream, /private const val SYSTEM_AUDIO_SAMPLE_RATE = 48000/);
+  assert.match(stream, /AudioFormat\.CHANNEL_IN_MONO/);
+  assert.match(stream, /AudioRecord\.Builder\(\)/);
+  assert.match(stream, /setAudioPlaybackCaptureConfig\(configuration\)/);
+  // The ADM's expected input format is aligned to the injected record (48 kHz mono).
+  assert.match(stream, /admBuilder\.setInputSampleRate\(SYSTEM_AUDIO_SAMPLE_RATE\)/);
+  assert.match(stream, /admBuilder\.setUseStereoInput\(false\)/);
+  assert.match(stream, /screen\.getMediaProjection\(\)/);
+  // 4) Reflection injection into JavaAudioDeviceModule.audioInput.audioRecord.
+  assert.match(stream, /getDeclaredField\("audioInput"\)/);
+  assert.match(stream, /getDeclaredField\("audioRecord"\)/);
+  assert.match(stream, /audioRecordField\.set\(audioInput, record\)/);
+  assert.match(stream, /adm\.prewarmRecording\(\)/);
+  // 5) Injection happens after ScreenCapturerAndroid.startCapture() (projection ready)
+  //    and before the WebRTC audio source / push is created.
+  const startAt = stream.indexOf('else capturer?.startCapture(captureWidth, captureHeight, fps)');
+  const injectAt = stream.indexOf('if (!useCamera && systemAudioRequested) tryEnableSystemAudioCapture()');
+  const audioSourceAt = stream.indexOf('createAudioSource(audioConstraints)');
+  assert.ok(startAt > 0 && injectAt > startAt && audioSourceAt > injectAt,
+    'system-audio injection must be between startCapture and createAudioSource');
+  // 6) Any failure falls back to the microphone and is reported with a status code.
+  assert.match(stream, /STATUS_SYSTEM_AUDIO_FALLBACK/);
+  assert.match(stream, /tr\("svc\.systemAudioFallback"/);
+  assert.match(stream, /private fun releaseInjectedSystemAudioRecord\(\)/);
+  assert.match(stream, /record\.state == AudioRecord\.STATE_INITIALIZED/);
+  assert.match(stream, /releaseInjectedSystemAudioRecord\(\)\n        systemAudioRequested = false/);
+  // 7) Toggle off keeps the original microphone path exactly as before.
+  assert.match(stream, /if \(!useCamera && systemAudioRequested\) tryEnableSystemAudioCapture\(\)/);
+  assert.match(stream, /val audio = factory!!\.createAudioSource\(audioConstraints\)/);
+  assert.match(stream, /audioTrack = factory!!\.createAudioTrack\("conglive-microphone", audio\)/);
+  // 8) Bilingual dictionary entries for the toggle and every fallback reason.
+  for (const key of [
+    'broadcast.systemAudioTitle', 'broadcast.systemAudioOn', 'broadcast.systemAudioOff',
+    'broadcast.systemAudioBody', 'broadcast.systemAudioEnabledHint', 'broadcast.systemAudioDisabledHint',
+    'broadcast.audioSource', 'broadcast.audioSourceSystem', 'broadcast.audioSourceMic',
+    'svc.systemAudioEnabled', 'svc.systemAudioFallback', 'svc.systemAudioNoProjection',
+    'svc.systemAudioNoAdm', 'svc.systemAudioBuffer', 'svc.systemAudioNotInitialized',
+    'svc.systemAudioPrewarm', 'svc.systemAudioReflection'
+  ]) {
     assert.ok(l10nSrc.includes(`"${key}" to (`), `dictionary must define ${key}`);
   }
 });

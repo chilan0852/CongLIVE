@@ -6,6 +6,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.IBinder
@@ -65,6 +69,8 @@ class ScreenStreamService : Service() {
         const val EXTRA_VIDEO_HEIGHT = "video_height"
         const val EXTRA_VIDEO_BITRATE = "video_bitrate"
         const val EXTRA_VIDEO_FPS = "video_fps"
+        /** v0.8.2: experimental AudioPlaybackCapture (screen sharing only). */
+        const val EXTRA_SYSTEM_AUDIO = "system_audio"
         const val EXTRA_MESSAGE = "message"
         /** Machine-readable status kind; the Activity must not parse localized text. */
         const val EXTRA_STATUS_CODE = "status_code"
@@ -79,6 +85,10 @@ class ScreenStreamService : Service() {
         const val STATUS_CAMERA_STARTED = "camera_started"
         const val STATUS_CAMERA_FRONT = "camera_front"
         const val STATUS_CAMERA_BACK = "camera_back"
+        const val STATUS_SYSTEM_AUDIO = "system_audio"
+        const val STATUS_SYSTEM_AUDIO_FALLBACK = "system_audio_fallback"
+        /** v0.8.2: AudioPlaybackCapture PCM format (48 kHz mono PCM16). */
+        private const val SYSTEM_AUDIO_SAMPLE_RATE = 48000
         private const val MIN_VIDEO_DIMENSION = 160
         private const val MAX_VIDEO_DIMENSION = 1920
         private const val MIN_VIDEO_BITRATE = 100_000
@@ -120,6 +130,11 @@ class ScreenStreamService : Service() {
     @Volatile private var pendingCall: Call? = null
     /** v0.7.7: language code from the most recent start Intent (see [currentLanguage]). */
     @Volatile private var requestedLanguageCode: String? = null
+    /** v0.8.2: experimental system-audio capture requested by the broadcast page. */
+    private var systemAudioRequested = false
+    /** The playback-capture AudioRecord injected into the ADM (owned by it afterwards). */
+    private var injectedSystemAudioRecord: AudioRecord? = null
+    private var systemAudioInjected = false
     /** Serializes worker hand-off and teardown so a joining stop cannot miss a worker. */
     private val stateLock = Any()
 
@@ -166,6 +181,10 @@ class ScreenStreamService : Service() {
             return
         }
         cameraMode = intent.getBooleanExtra(EXTRA_CAMERA_MODE, false)
+        // v0.8.2: system audio capture is only supported for screen sharing.
+        systemAudioRequested = intent.getBooleanExtra(EXTRA_SYSTEM_AUDIO, false) && !cameraMode
+        injectedSystemAudioRecord = null
+        systemAudioInjected = false
         val fallback = VideoSettings.defaultResolution()
         configuredWidth = sanitizeDimension(intent.getIntExtra(EXTRA_VIDEO_WIDTH, fallback.width), fallback.width)
         configuredHeight = sanitizeDimension(intent.getIntExtra(EXTRA_VIDEO_HEIGHT, fallback.height), fallback.height)
@@ -269,7 +288,14 @@ class ScreenStreamService : Service() {
         )
         val egl = EglBase.create()
         eglBase = egl
-        val adm = JavaAudioDeviceModule.builder(applicationContext).createAudioDeviceModule()
+        val admBuilder = JavaAudioDeviceModule.builder(applicationContext)
+        if (systemAudioRequested) {
+            // v0.8.2: the injected AudioPlaybackCapture record is 48 kHz mono PCM16;
+            // keep the ADM's expected input format identical so WebRTC reads it correctly.
+            admBuilder.setInputSampleRate(SYSTEM_AUDIO_SAMPLE_RATE)
+            admBuilder.setUseStereoInput(false)
+        }
+        val adm = admBuilder.createAudioDeviceModule()
         audioModule = adm
         abortIfStopped()
         factory = PeerConnectionFactory.builder()
@@ -331,6 +357,11 @@ class ScreenStreamService : Service() {
         if (useCamera) cameraCapturer?.startCapture(captureWidth, captureHeight, fps)
         else capturer?.startCapture(captureWidth, captureHeight, fps)
         abortIfStopped()
+        // v0.8.2: ScreenCapturerAndroid creates its MediaProjection inside startCapture(),
+        // so the experimental AudioPlaybackCapture recorder is built and injected here —
+        // after the projection exists but before the WebRTC audio source is created.
+        if (!useCamera && systemAudioRequested) tryEnableSystemAudioCapture()
+        abortIfStopped()
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
@@ -338,6 +369,114 @@ class ScreenStreamService : Service() {
         val audio = factory!!.createAudioSource(audioConstraints)
         audioSource = audio
         audioTrack = factory!!.createAudioTrack("conglive-microphone", audio).apply { setEnabled(true) }
+    }
+
+    /**
+     * v0.8.2 (experimental): capture the device playback audio with
+     * AudioPlaybackCapture and let WebRTC send that instead of the microphone.
+     *
+     * The AudioRecord is injected into the private `audioRecord` field of
+     * JavaAudioDeviceModule.audioInput (WebRtcAudioRecord), so the normal WebRTC
+     * audio path keeps working. Permission / MediaProjection / AudioPlaybackCapture /
+     * reflection failures are reported and leave the microphone path untouched.
+     */
+    private fun tryEnableSystemAudioCapture() {
+        val screen = capturer as? ScreenCapturerAndroid
+        if (screen == null) {
+            sendStatus(tr("svc.systemAudioFallback", tr("svc.systemAudioNoProjection")), STATUS_SYSTEM_AUDIO_FALLBACK)
+            return
+        }
+        var pending: AudioRecord? = null
+        try {
+            val projection = screen.getMediaProjection()
+                ?: throw IllegalStateException(tr("svc.systemAudioNoProjection"))
+            val adm = audioModule ?: throw IllegalStateException(tr("svc.systemAudioNoAdm"))
+            val configuration = AudioPlaybackCaptureConfiguration.Builder(projection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SYSTEM_AUDIO_SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+            val minBuffer = AudioRecord.getMinBufferSize(
+                SYSTEM_AUDIO_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            if (minBuffer <= 0) throw IllegalStateException(tr("svc.systemAudioBuffer", minBuffer))
+            val record = AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(minBuffer * 2)
+                .setAudioPlaybackCaptureConfig(configuration)
+                .build()
+            pending = record
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                throw IllegalStateException(tr("svc.systemAudioNotInitialized"))
+            }
+            // prewarmRecording() allocates WebRtcAudioRecord's byteBuffer first; injecting
+            // before this point would make initRecordingIfNeeded() skip that allocation.
+            if (!adm.prewarmRecording()) throw IllegalStateException(tr("svc.systemAudioPrewarm"))
+            if (!injectAudioRecordIntoAdm(adm, record)) {
+                throw IllegalStateException(tr("svc.systemAudioReflection"))
+            }
+            // Ownership moved to WebRtcAudioRecord (it releases the record on stop).
+            pending = null
+            injectedSystemAudioRecord = record
+            systemAudioInjected = true
+            sendStatus(tr("svc.systemAudioEnabled", SYSTEM_AUDIO_SAMPLE_RATE), STATUS_SYSTEM_AUDIO)
+        } catch (error: Exception) {
+            try {
+                pending?.release()
+            } catch (_: Exception) {
+            }
+            injectedSystemAudioRecord = null
+            systemAudioInjected = false
+            sendStatus(
+                tr("svc.systemAudioFallback", error.message ?: error.javaClass.simpleName),
+                STATUS_SYSTEM_AUDIO_FALLBACK
+            )
+        }
+    }
+
+    /**
+     * Reflective injection: JavaAudioDeviceModule keeps the recorder in its
+     * `audioInput` (WebRtcAudioRecord) object; its private `audioRecord` field is
+     * swapped from the microphone recorder to the playback-capture recorder.
+     */
+    private fun injectAudioRecordIntoAdm(adm: JavaAudioDeviceModule, record: AudioRecord): Boolean {
+        return try {
+            val audioInputField = JavaAudioDeviceModule::class.java.getDeclaredField("audioInput")
+            audioInputField.isAccessible = true
+            val audioInput = audioInputField.get(adm) ?: return false
+            val audioRecordField = audioInput.javaClass.getDeclaredField("audioRecord")
+            audioRecordField.isAccessible = true
+            val previous = audioRecordField.get(audioInput) as? AudioRecord
+            audioRecordField.set(audioInput, record)
+            // The prewarmed microphone AudioRecord is not used any more.
+            try {
+                previous?.release()
+            } catch (_: Exception) {
+            }
+            audioRecordField.get(audioInput) === record
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** v0.8.2: last-resort cleanup; WebRtcAudioRecord usually releases it on stop. */
+    private fun releaseInjectedSystemAudioRecord() {
+        val record = injectedSystemAudioRecord
+        injectedSystemAudioRecord = null
+        systemAudioInjected = false
+        if (record == null) return
+        try {
+            // Never release twice: a record already released by the ADM is uninitialized.
+            if (record.state == AudioRecord.STATE_INITIALIZED) record.release()
+        } catch (_: Exception) {
+        }
     }
 
     /** Configures the capture/encoder format from the broadcast-page settings.
@@ -648,6 +787,10 @@ class ScreenStreamService : Service() {
         } catch (_: Exception) {
         }
         audioModule = null
+        // v0.8.2: release the experimental playback-capture record last (if the
+        // WebRtcAudioRecord did not own/release it already).
+        releaseInjectedSystemAudioRecord()
+        systemAudioRequested = false
         try {
             eglBase?.release()
         } catch (_: Exception) {

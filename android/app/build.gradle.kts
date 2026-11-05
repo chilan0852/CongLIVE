@@ -12,8 +12,8 @@ android {
         applicationId = "com.conglive.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 23
-        versionName = "0.8.1"
+        versionCode = 24
+        versionName = "0.8.2"
     }
 
     compileOptions {

@@ -2,6 +2,7 @@ package com.conglive.app
 
 import android.content.Context
 import android.graphics.Color
+import android.net.Uri
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -9,13 +10,16 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Lightweight WebView wrapper for the Live2D 看板娘 page.
  *
  * The page itself is a local asset (`assets/live2d/viewer.html`) that pulls
- * pixi.js + pixi-live2d-display + Cubism Core from their CDNs. No model files
- * are bundled: the user pastes a public `.model3.json` URL at runtime.
+ * pixi.js + pixi-live2d-display + Cubism Core + JSZip from their CDNs. No model
+ * files are bundled: the user either pastes a public `.model3.json` URL or picks
+ * a local `.zip` model package (v0.8.2), which MainActivity copies into
+ * cacheDir and this class hands to the page as `?zip=<file:// URL>`.
  *
  * The WebView is only a UI companion. It is deliberately NOT composited into
  * the WebRTC camera/screen track — the live stream pipeline is untouched.
@@ -29,6 +33,9 @@ class Live2DViewer(
     companion object {
         private const val ASSET_URL = "file:///android_asset/live2d/viewer.html"
         private const val BRIDGE_NAME = "AndroidLive2D"
+
+        /** v0.8.2: query parameter that carries an encoded local zip `file://` URL. */
+        private const val ZIP_QUERY = "zip"
     }
 
     /** v0.7.7: current UI language; can be changed without recreating the WebView. */
@@ -40,6 +47,9 @@ class Live2DViewer(
     private var pageReady = false
     private var pendingModelUrl: String? = null
 
+    /** v0.8.2: last picked local zip, kept so reload()/language keeps the package. */
+    private var localZipUrl: String? = null
+
     init {
         webView.setBackgroundColor(Color.rgb(10, 15, 30))
         webView.isVerticalScrollBarEnabled = false
@@ -50,6 +60,10 @@ class Live2DViewer(
             // The page is a local asset but its scripts come from https CDNs.
             allowFileAccess = true
             allowContentAccess = true
+            // v0.8.2: the local page (file:///android_asset) must be able to read
+            // the picked model zip from cacheDir (file:///data/...). Both switches
+            // are required by the WebView file-origin security model.
+            enableLocalFileAccess(this)
             mediaPlaybackRequiresUserGesture = false
             cacheMode = WebSettings.LOAD_DEFAULT
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -77,6 +91,14 @@ class Live2DViewer(
             }
         }
         webView.loadUrl(ASSET_URL)
+    }
+
+    /** v0.8.2: lets the local viewer page read the model zip copied into cacheDir. */
+    @Suppress("DEPRECATION")
+    private fun enableLocalFileAccess(settings: WebSettings) {
+        settings.allowFileAccess = true
+        settings.allowFileAccessFromFileURLs = true
+        settings.allowUniversalAccessFromFileURLs = true
     }
 
     /** v0.7.7: switches the WebView's own status/errors without reloading the page. */
@@ -114,11 +136,37 @@ class Live2DViewer(
         runScript("window.loadLive2DModel(" + JSONObject.quote(url) + ");")
     }
 
-    /** Reloads the local page (e.g. after a CDN hiccup). */
+    /**
+     * v0.8.2: loads a local `.zip` Live2D model package picked by the user.
+     *
+     * MainActivity already copied the content URI into cacheDir (the WebView
+     * cannot read `content://` directly), so `file` is a readable file. The page
+     * is (re)loaded with `?zip=<encoded file URL>`; viewer.html unzips it with
+     * JSZip and maps every model reference to a blob URL before loading it.
+     */
+    fun loadLocalZip(file: File) {
+        if (!file.exists() || file.length() <= 0L) {
+            onError(tr("live2d.zipEmpty"))
+            return
+        }
+        val fileUrl = Uri.fromFile(file).toString()
+        localZipUrl = fileUrl
+        pendingModelUrl = null
+        pageReady = false
+        onStatus(tr("live2d.zipLoading"))
+        webView.loadUrl(pageUrlWithZip(fileUrl))
+    }
+
+    /** The local page URL, with the picked zip appended when there is one. */
+    private fun pageUrlWithZip(fileUrl: String): String =
+        ASSET_URL + "?" + ZIP_QUERY + "=" + Uri.encode(fileUrl)
+
+    /** Reloads the local page (e.g. after a CDN hiccup), keeping the picked zip. */
     fun reload() {
         pageReady = false
         pendingModelUrl = null
-        webView.loadUrl(ASSET_URL)
+        val zipUrl = localZipUrl
+        webView.loadUrl(if (zipUrl == null) ASSET_URL else pageUrlWithZip(zipUrl))
         onStatus(tr("live2d.reloading"))
     }
 

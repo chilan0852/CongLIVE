@@ -133,3 +133,23 @@ gradle :app:assembleDebug
 - **中继状态**：语音卡片显示「正在获取中继凭据… / 中继：TURN（跨 NAT 更稳定） / 直连 / STUN / 无法获取 TURN 凭据（HTTP xxx），已回退 STUN 直连」，中英双语。
 - **无硬编码 STUN**：`VoiceRoomClient` 只使用构造参数传入的 ICE 列表，`RTCConfiguration(iceServers)` 每个远端 peer 复用之。
 - **版本**：versionCode 23 / versionName 0.8.1；0.8.0 的 lazy mic / 信令 / 说话状态 / 清理逻辑与 0.7.9 功能全部保留。
+
+## v0.8.2 新增（Live2D 本地模型包）
+
+- **「选择模型包」按钮**：看板娘页新增按钮，通过 `ActivityResultContracts.OpenDocument` 唤起系统文件选择器，MIME 过滤 `application/zip` + `application/octet-stream`（兼容文件管理器把 zip 识别成 octet-stream 的情况），无需任何存储权限。
+- **缓存复制**：选中的 `content://` URI 在后台线程复制到 `cacheDir/live2d-model-<ts>.zip`（单包上限 128 MB），WebView 只能读 `file://`，因此先落地再交给页面；再次选择会删除上一个缓存包。
+- **`Live2DViewer.loadLocalZip(File)`**：WebView 加载 `file:///android_asset/live2d/viewer.html?zip=<encoded file url>`，并开启 `allowFileAccessFromFileURLs` / `allowUniversalAccessFromFileURLs`，让本地页面能读取缓存 zip；`reload()` 会保留当前模型包。原有 URL 输入方式与 CDN 运行库加载完全保留。
+- **`viewer.html` 解包**：引入 JSZip CDN（`jszip@3.10.1`，失败时提示「JSZip 未加载，请检查网络」）；读取 `?zip=` → 先 `fetch`、失败回退 `XMLHttpRequest`（部分 WebView 不允许 fetch `file://`）→ `JSZip.loadAsync` → 为每个条目建 blob URL → 改写 `.model3.json` 的 `FileReferences`（`Moc` / `Textures` / `Physics` / `Pose` / `Expressions` / `Motions` 含 `Sound`）为绝对 blob URL → 复用现有 `window.loadLive2DModel`；加载新模型前 `revokeObjectURL` 旧 blob，避免泄漏。pixi 6 的 legacy `url.resolve` 会把 `blob:file:///x` 改坏成 `blob:file///x`，页面启动时用 URL 标准替换该实现（相对路径仍可解析）。
+- **错误提示（中英双语）**：压缩包里没有 `.model3.json`、模型包缺资源文件、zip 读取失败、模型包为空、最大体积超限、JSZip CDN 失败均有明确文案。
+- **保留**：看板娘仍只做界面显示，不会合成进 WebRTC 直播画面；摄像头预览、推流、语音房、中英双语与黑屏修复全部不变。
+- **版本**：versionCode 24 / versionName 0.8.2，minSdk 29 / targetSdk 34。0.8.1 的 TURN 凭据 / STUN 回退与 0.8.0、0.7.9 功能全部保留。
+
+## v0.8.2 新增（屏幕直播系统内录 · 实验）
+
+- **开播页开关**：屏幕模式下新增「系统音频（实验）」开关，默认关闭并持久化在 SharedPreferences `audio_system_capture`；开启时提示会替换麦克风音频；仅屏幕共享可用（摄像头模式不显示）。
+- **Intent extra**：`ScreenStreamService.EXTRA_SYSTEM_AUDIO = "system_audio"`，只有屏幕模式且开关开启时才为 `true`。
+- **AudioPlaybackCapture**：`ScreenStreamService` 在 `ScreenCapturerAndroid.startCapture()`（此时 MediaProjection 可用）之后、WebRTC 音频源创建之前，用 `capturer.getMediaProjection()` 构造 `AudioPlaybackCaptureConfiguration`（USAGE_MEDIA / USAGE_GAME / USAGE_UNKNOWN）并创建 48 kHz 单声道 PCM16 `AudioRecord`。
+- **反射注入**：先 `JavaAudioDeviceModule.prewarmRecording()` 初始化 WebRTC 的 byteBuffer，再反射把 AudioRecord 注入 `JavaAudioDeviceModule.audioInput` 的私有 `audioRecord` 字段（替换麦克风录音），使 WebRTC 发送设备播放声音而不是麦克风；ADM 输入格式同步对齐 48 kHz 单声道。
+- **失败回退**：权限 / MediaProjection / AudioPlaybackCapture / 反射任一步失败都会发送 `system_audio_fallback` 状态并在通知/开播页显示原因，继续使用原麦克风路径；停止时由 ADM 释放注入的 record，服务再做一次带状态检查的兜底释放，避免重复释放。
+- **保留**：麦克风开播、摄像头预览、语音房/TURN、1080p60、双语与图标全部不变。
+- **限制**：无 Android 设备/模拟器实测；AudioPlaybackCapture 需要源 App 允许被录制，部分 App（如受保护音频）会静音，具体以真机验证为准。

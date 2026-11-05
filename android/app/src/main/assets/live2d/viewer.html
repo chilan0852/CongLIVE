@@ -34,7 +34,7 @@
 <body>
   <!-- 只做界面看板娘，不会被合成进直播画面 / WebRTC 推流。 -->
   <div id="stage"></div>
-  <div id="tip">输入 .model3.json 地址后点击「加载模型」</div>
+  <div id="tip">选择模型包，或输入 .model3.json 地址后点击「加载模型」</div>
 
   <!-- 运行库全部走 CDN，不内置模型或第三方大文件。 -->
   <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"
@@ -43,19 +43,42 @@
           onerror="window.__congliveCdnError = 'Live2D Cubism Core';"></script>
   <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"
           onerror="window.__congliveCdnError = 'pixi-live2d-display';"></script>
+  <!-- v0.8.2: JSZip 只用来看本地模型包（zip），失败时给出明确提示。 -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"
+          onerror="window.__congliveJszipError = 'JSZip';"></script>
 
   <script>
     (function () {
       var app = null;
       var model = null;
       var tip = document.getElementById('tip');
+      // v0.8.2: blob URLs created while unzipping a local model package.
+      var activeBlobUrls = [];
+
+      // v0.8.2: pixi.js 6 resolves model file references with the legacy Node
+      // `url.resolve`, which mangles absolute blob URLs on file:// pages
+      // (blob:file:///x -> blob:file///x). Our rewritten FileReferences are
+      // already absolute, so resolve them with the URL standard instead.
+      (function patchPixiResolve() {
+        try {
+          if (!window.PIXI || !PIXI.utils || !PIXI.utils.url) return;
+          var legacyResolve = PIXI.utils.url.resolve;
+          PIXI.utils.url.resolve = function (from, to) {
+            try {
+              return new URL(String(to), String(from)).toString();
+            } catch (error) {
+              return legacyResolve(from, to);
+            }
+          };
+        } catch (error) { }
+      })();
 
       // v0.7.7: zh/en strings for the Live2D page itself. Android calls
       // window.setLive2DLanguage("zh"|"en") when the in-app language changes.
       var STRINGS = {
         zh: {
           title: 'Live2D 看板娘',
-          tip: '输入 .model3.json 地址后点击「加载模型」',
+          tip: '选择模型包，或输入 .model3.json 地址后点击「加载模型」',
           ready: 'Live2D 页面已就绪',
           loading: '正在加载模型…',
           loaded: '模型加载完成',
@@ -66,11 +89,18 @@
           hidden: '模型已隐藏',
           cdnFailed: '%s 加载失败，请检查网络',
           runtimeMissing: 'Live2D 运行库未加载，请检查网络后重试',
-          pixiMissing: 'pixi.js 未加载'
+          pixiMissing: 'pixi.js 未加载',
+          zipLoading: '正在解析模型包…',
+          zipReadFailed: '读取模型包失败：',
+          zipNoModel: '压缩包里没有 .model3.json 模型文件',
+          zipMissingFile: '模型包缺少资源文件：%s',
+          zipEmpty: '模型包为空或无法读取',
+          jszipMissing: 'JSZip 未加载，无法读取模型包，请检查网络后重试',
+          zipLoaded: '本地模型包加载完成'
         },
         en: {
           title: 'Live2D Mascot',
-          tip: 'Paste a .model3.json URL, then tap “Load model”',
+          tip: 'Pick a model package, or paste a .model3.json URL and tap “Load model”',
           ready: 'Live2D page ready',
           loading: 'Loading model…',
           loaded: 'Model loaded',
@@ -81,7 +111,14 @@
           hidden: 'Model hidden',
           cdnFailed: 'Failed to load %s; check your network',
           runtimeMissing: 'The Live2D runtime failed to load; check your network and retry',
-          pixiMissing: 'pixi.js is not loaded'
+          pixiMissing: 'pixi.js is not loaded',
+          zipLoading: 'Reading the model package…',
+          zipReadFailed: 'Could not read the model package: ',
+          zipNoModel: 'The .zip contains no .model3.json model file',
+          zipMissingFile: 'The model package is missing: %s',
+          zipEmpty: 'The model package is empty or unreadable',
+          jszipMissing: 'JSZip failed to load; check your network and retry',
+          zipLoaded: 'Local model package loaded'
         }
       };
       var strings = STRINGS.zh;
@@ -152,6 +189,256 @@
         model = null;
       }
 
+      // -----------------------------------------------------------------
+      // v0.8.2: local .zip model packages
+      //
+      // Android loads this page as
+      //   file:///android_asset/live2d/viewer.html?zip=<encoded file:// URL>
+      // after copying the picked document into cacheDir. We read the bytes,
+      // unzip them with JSZip, turn every entry into a blob URL and rewrite the
+      // relative FileReferences of the *.model3.json so pixi-live2d-display can
+      // load the model exactly like a remote one.
+      // -----------------------------------------------------------------
+
+      function revokeBlobUrls() {
+        for (var i = 0; i < activeBlobUrls.length; i++) {
+          try { URL.revokeObjectURL(activeBlobUrls[i]); } catch (error) { }
+        }
+        activeBlobUrls = [];
+      }
+
+      function normalizePath(path) {
+        var parts = String(path || '').replace(/\\/g, '/').split('/');
+        var out = [];
+        for (var i = 0; i < parts.length; i++) {
+          var part = parts[i];
+          if (!part || part === '.') continue;
+          if (part === '..') out.pop();
+          else out.push(part);
+        }
+        return out.join('/');
+      }
+
+      function dirName(path) {
+        var index = path.lastIndexOf('/');
+        return index < 0 ? '' : path.slice(0, index);
+      }
+
+      function isAbsoluteRef(ref) {
+        return /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(String(ref));
+      }
+
+      function joinPath(baseDir, ref) {
+        var value = String(ref || '');
+        if (isAbsoluteRef(value)) return value;
+        return normalizePath(baseDir ? baseDir + '/' + value : value);
+      }
+
+      function mimeFor(path) {
+        var index = path.lastIndexOf('.');
+        var ext = index < 0 ? '' : path.slice(index + 1).toLowerCase();
+        var map = {
+          png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+          webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp',
+          json: 'application/json', moc3: 'application/octet-stream',
+          mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg'
+        };
+        return map[ext] || 'application/octet-stream';
+      }
+
+      // file:// pages cannot use fetch() for local files on some WebViews, so
+      // fall back to XMLHttpRequest (allowFileAccessFromFileURLs is enabled by
+      // Live2DViewer for exactly this).
+      function readZipBytesViaXhr(url) {
+        return new Promise(function (resolve, reject) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', url, true);
+          xhr.responseType = 'arraybuffer';
+          xhr.onload = function () {
+            if (xhr.status === 200 || xhr.status === 0) resolve(xhr.response);
+            else reject(new Error('HTTP ' + xhr.status));
+          };
+          xhr.onerror = function () { reject(new Error('network error')); };
+          xhr.send();
+        });
+      }
+
+      function readZipBytes(url) {
+        var attempt;
+        try {
+          attempt = fetch(url);
+        } catch (error) {
+          return readZipBytesViaXhr(url);
+        }
+        return attempt.then(function (response) {
+          if (!response || !response.ok) throw new Error('HTTP ' + (response && response.status));
+          return response.arrayBuffer();
+        }).catch(function () {
+          return readZipBytesViaXhr(url);
+        });
+      }
+
+      // Every file reference inside a .model3.json, resolved against the model's
+      // own directory inside the zip.
+      function collectModelRefs(settings, modelDir, files) {
+        var refs = settings && settings.FileReferences;
+        if (!refs) throw new Error(msg('zipMissingFile').replace('%s', 'FileReferences'));
+        var paths = [];
+        function add(value) {
+          if (typeof value !== 'string' || !value) return;
+          if (isAbsoluteRef(value)) return;
+          var full = joinPath(modelDir, value);
+          if (!files[full]) throw new Error(msg('zipMissingFile').replace('%s', full));
+          paths.push(full);
+        }
+        add(refs.Moc);
+        add(refs.Physics);
+        add(refs.Pose);
+        add(refs.UserData);
+        add(refs.DisplayInfo);
+        if (Object.prototype.toString.call(refs.Textures) === '[object Array]') {
+          for (var i = 0; i < refs.Textures.length; i++) add(refs.Textures[i]);
+        }
+        if (Object.prototype.toString.call(refs.Expressions) === '[object Array]') {
+          for (var j = 0; j < refs.Expressions.length; j++) {
+            if (refs.Expressions[j]) add(refs.Expressions[j].File);
+          }
+        }
+        if (refs.Motions && typeof refs.Motions === 'object') {
+          Object.keys(refs.Motions).forEach(function (group) {
+            var items = refs.Motions[group];
+            if (Object.prototype.toString.call(items) !== '[object Array]') return;
+            for (var k = 0; k < items.length; k++) {
+              if (!items[k]) continue;
+              add(items[k].File);
+              add(items[k].Sound);
+            }
+          });
+        }
+        return paths;
+      }
+
+      function createBlobMap(paths, files) {
+        var unique = [];
+        var seen = {};
+        for (var i = 0; i < paths.length; i++) {
+          if (!seen[paths[i]]) { seen[paths[i]] = true; unique.push(paths[i]); }
+        }
+        return Promise.all(unique.map(function (path) {
+          return files[path].async('uint8array').then(function (bytes) {
+            var blobUrl = URL.createObjectURL(new Blob([bytes], { type: mimeFor(path) }));
+            activeBlobUrls.push(blobUrl);
+            return { path: path, url: blobUrl };
+          });
+        })).then(function (items) {
+          var mapping = {};
+          for (var i = 0; i < items.length; i++) mapping[items[i].path] = items[i].url;
+          return mapping;
+        });
+      }
+
+      function applyBlobRefs(settings, modelDir, mapping) {
+        var refs = settings.FileReferences;
+        function map(value) {
+          if (typeof value !== 'string' || !value || isAbsoluteRef(value)) return value;
+          return mapping[joinPath(modelDir, value)] || value;
+        }
+        if (refs.Moc) refs.Moc = map(refs.Moc);
+        if (refs.Physics) refs.Physics = map(refs.Physics);
+        if (refs.Pose) refs.Pose = map(refs.Pose);
+        if (refs.UserData) refs.UserData = map(refs.UserData);
+        if (refs.DisplayInfo) refs.DisplayInfo = map(refs.DisplayInfo);
+        if (Object.prototype.toString.call(refs.Textures) === '[object Array]') {
+          for (var i = 0; i < refs.Textures.length; i++) refs.Textures[i] = map(refs.Textures[i]);
+        }
+        if (Object.prototype.toString.call(refs.Expressions) === '[object Array]') {
+          for (var j = 0; j < refs.Expressions.length; j++) {
+            if (refs.Expressions[j]) refs.Expressions[j].File = map(refs.Expressions[j].File);
+          }
+        }
+        if (refs.Motions && typeof refs.Motions === 'object') {
+          Object.keys(refs.Motions).forEach(function (group) {
+            var items = refs.Motions[group];
+            if (Object.prototype.toString.call(items) !== '[object Array]') return;
+            for (var k = 0; k < items.length; k++) {
+              if (!items[k]) continue;
+              items[k].File = map(items[k].File);
+              items[k].Sound = map(items[k].Sound);
+            }
+          });
+        }
+      }
+
+      // Unzips `zipUrl`, rewrites one *.model3.json and returns a blob URL for
+      // the rewritten settings JSON (pixi-live2d-display then loads it).
+      function buildModelFromZip(zipUrl) {
+        return readZipBytes(zipUrl).then(function (buffer) {
+          return JSZip.loadAsync(buffer);
+        }).then(function (zip) {
+          var files = {};
+          var models = [];
+          zip.forEach(function (relativePath, entry) {
+            if (!entry || entry.dir) return;
+            var path = normalizePath(relativePath);
+            if (!path) return;
+            files[path] = entry;
+            if (/\.model3\.json$/i.test(path)) models.push(path);
+          });
+          if (!models.length) throw new Error(msg('zipNoModel'));
+          // Prefer the shallowest .model3.json (packages often keep a root folder).
+          models.sort(function (a, b) {
+            var depth = a.split('/').length - b.split('/').length;
+            return depth !== 0 ? depth : a.localeCompare(b);
+          });
+          var modelPath = models[0];
+          var modelDir = dirName(modelPath);
+          return files[modelPath].async('string').then(function (text) {
+            var settings = JSON.parse(text);
+            var paths = collectModelRefs(settings, modelDir, files);
+            return createBlobMap(paths, files).then(function (mapping) {
+              applyBlobRefs(settings, modelDir, mapping);
+              var blobUrl = URL.createObjectURL(new Blob([JSON.stringify(settings)], { type: 'application/json' }));
+              activeBlobUrls.push(blobUrl);
+              return blobUrl;
+            });
+          });
+        });
+      }
+
+      window.loadLive2DZip = function (zipUrl) {
+        var raw = String(zipUrl || '').trim();
+        if (!raw) {
+          reportError(msg('zipEmpty'));
+          return false;
+        }
+        if (!window.JSZip) {
+          reportError(window.__congliveJszipError
+            ? msg('cdnFailed').replace('%s', window.__congliveJszipError)
+            : msg('jszipMissing'));
+          return false;
+        }
+        if (!hasLive2D()) {
+          reportError(window.__congliveCdnError
+            ? msg('cdnFailed').replace('%s', window.__congliveCdnError)
+            : msg('runtimeMissing'));
+          return false;
+        }
+        tip.textContent = msg('zipLoading');
+        report(msg('zipLoading'));
+        // Drop the previous model and its blob URLs before creating new ones.
+        destroyModel();
+        revokeBlobUrls();
+        buildModelFromZip(raw).then(function (modelJsonUrl) {
+          // Reuse the existing URL loader; the rewritten JSON only points at
+          // blob URLs, so no relative resolution is needed.
+          window.loadLive2DModel(modelJsonUrl);
+        }).catch(function (error) {
+          var message = error && error.message ? error.message : String(error);
+          reportError(msg('zipReadFailed') + message);
+        });
+        return true;
+      };
+
       window.loadLive2DModel = function (url) {
         if (!hasLive2D()) {
           reportError(window.__congliveCdnError ? msg('cdnFailed').replace('%s', window.__congliveCdnError) : msg('runtimeMissing'));
@@ -200,7 +487,23 @@
       };
 
       window.addEventListener('resize', resizeModel);
-      report(msg('ready'));
+
+      // v0.8.2: `?zip=<encoded file:// url>` is set by Live2DViewer.loadLocalZip.
+      function readZipQuery() {
+        try {
+          if (window.URLSearchParams) return new URLSearchParams(window.location.search).get('zip');
+        } catch (error) { }
+        var match = /[?&]zip=([^&]*)/.exec(window.location.search || '');
+        if (!match) return null;
+        try { return decodeURIComponent(match[1]); } catch (error) { return match[1]; }
+      }
+
+      var initialZip = readZipQuery();
+      if (initialZip) {
+        window.loadLive2DZip(initialZip);
+      } else {
+        report(msg('ready'));
+      }
     })();
   </script>
 </body>

@@ -412,6 +412,31 @@ object L10n {
             "开始时会弹出 Android 系统屏幕共享授权。" to
                 "Android will ask for screen-sharing permission when you start."
             ),
+        // v0.8.2: experimental AudioPlaybackCapture toggle (screen sharing only).
+        "broadcast.systemAudioTitle" to ("系统音频（实验）" to "System audio (experimental)"),
+        "broadcast.systemAudioOn" to (
+            "系统内录：已开启（替换麦克风）" to
+                "System audio: on (replaces microphone)"
+            ),
+        "broadcast.systemAudioOff" to (
+            "系统内录：关闭（使用麦克风）" to
+                "System audio: off (uses microphone)"
+            ),
+        "broadcast.systemAudioBody" to (
+            "开启后屏幕直播会尝试用 AudioPlaybackCapture 采集设备正在播放的声音并替换麦克风；部分 App 禁止被录制，部分机型会失败，失败时自动回退麦克风。" to
+                "When enabled, screen streaming tries to capture the audio playing on the device with AudioPlaybackCapture and replaces the microphone. Some apps block capture and some devices fail; failures fall back to the microphone automatically."
+            ),
+        "broadcast.systemAudioEnabledHint" to (
+            "已开启系统内录（实验）；无法采集时会自动回退麦克风" to
+                "System audio capture enabled (experimental); falls back to the microphone if capture fails"
+            ),
+        "broadcast.systemAudioDisabledHint" to (
+            "已关闭系统内录，开播将使用麦克风" to
+                "System audio capture disabled; streaming will use the microphone"
+            ),
+        "broadcast.audioSource" to ("音频来源" to "Audio source"),
+        "broadcast.audioSourceSystem" to ("系统内录（实验）" to "System audio (experimental)"),
+        "broadcast.audioSourceMic" to ("麦克风" to "Microphone"),
         "broadcast.titleHint" to ("直播标题" to "Stream title"),
         "broadcast.create" to ("创建直播并获取推流地址" to "Create stream and get publishing URL"),
         "broadcast.protocol" to ("传输协议" to "Protocol"),
@@ -490,20 +515,38 @@ object L10n {
                 "Shown only inside the app; it is never composited into the video or sent over WebRTC."
             ),
         "live2d.body2" to (
-            "输入模型 .model3.json 的公网地址；模型资源需要允许跨域访问（CORS）。运行库来自 CDN，App 不内置模型。" to
-                "Enter a public .model3.json URL; model assets must allow CORS. The runtime comes from a CDN and no model is bundled."
+            "「选择模型包」可直接读取本地 zip（含 .model3.json 与贴图/moc3 资源）；也可以输入模型 .model3.json 的公网地址，模型资源需要允许跨域访问（CORS）。运行库来自 CDN，App 不内置模型。" to
+                "“Choose model package” reads a local .zip that contains the .model3.json and its assets; alternatively enter a public .model3.json URL whose assets allow CORS. The runtime comes from a CDN and no model is bundled."
             ),
         "live2d.urlHint" to (
             "模型地址，例如 https://example.com/model.model3.json" to
                 "Model URL, e.g. https://example.com/model.model3.json"
             ),
         "live2d.load" to ("加载模型" to "Load model"),
+        "live2d.pickZip" to ("选择模型包" to "Choose model package"),
+        "live2d.zipChoose" to (
+            "请选择包含 .model3.json 与贴图资源的模型 zip 包" to
+                "Pick a model .zip that contains the .model3.json and its textures"
+            ),
+        "live2d.zipCopying" to ("正在读取模型包…" to "Reading the model package…"),
+        "live2d.zipCopied" to ("模型包已就绪：%s" to "Model package ready: %s"),
+        "live2d.zipCopyFailed" to (
+            "模型包复制失败，请重新选择" to
+                "Could not copy the model package; please pick it again"
+            ),
+        "live2d.zipCancelled" to ("已取消选择模型包" to "Model package selection cancelled"),
+        "live2d.zipEmpty" to ("模型包为空或无法读取" to "The model package is empty or unreadable"),
+        "live2d.zipTooLarge" to (
+            "模型包超过 %s MB，无法加载" to
+                "The model package exceeds %s MB and cannot be loaded"
+            ),
+        "live2d.zipLoading" to ("正在加载本地模型包…" to "Loading the local model package…"),
         "live2d.show" to ("显示" to "Show"),
         "live2d.hide" to ("隐藏" to "Hide"),
         "live2d.reload" to ("重新加载看板娘页面" to "Reload mascot page"),
         "live2d.waiting" to (
-            "等待模型：贴入 .model3.json 地址后点击「加载模型」。" to
-                "Waiting for a model: paste a .model3.json URL and tap “Load model”."
+            "等待模型：选择模型包，或贴入 .model3.json 地址后点击「加载模型」。" to
+                "Waiting for a model: pick a model package, or paste a .model3.json URL and tap “Load model”."
             ),
         "live2d.statusUpdated" to ("Live2D 状态已更新" to "Live2D status updated"),
         "live2d.loadFailed" to ("Live2D 加载失败" to "Live2D failed to load"),
@@ -599,6 +642,36 @@ object L10n {
                 "WHIP signalling complete; establishing the media connection…"
             ),
         "svc.videoSourceMissing" to ("视频源尚未初始化" to "The video source is not initialized"),
+        // v0.8.2: experimental AudioPlaybackCapture (screen sharing).
+        "svc.systemAudioEnabled" to (
+            "系统内录已启用（实验）：%s Hz 单声道，替换麦克风音频" to
+                "System audio capture enabled (experimental): %s Hz mono, replacing the microphone"
+            ),
+        "svc.systemAudioFallback" to (
+            "系统内录不可用，已回退麦克风：%s" to
+                "System audio capture unavailable; fell back to the microphone: %s"
+            ),
+        "svc.systemAudioNoProjection" to (
+            "无法获取 MediaProjection" to
+                "Could not access the MediaProjection"
+            ),
+        "svc.systemAudioNoAdm" to ("音频模块尚未初始化" to "The audio module is not initialized"),
+        "svc.systemAudioBuffer" to (
+            "系统内录缓冲区无效：%s" to
+                "Invalid system-audio capture buffer: %s"
+            ),
+        "svc.systemAudioNotInitialized" to (
+            "系统内录 AudioRecord 初始化失败" to
+                "The system-audio AudioRecord failed to initialize"
+            ),
+        "svc.systemAudioPrewarm" to (
+            "音频采集预初始化失败" to
+                "Audio capture pre-initialization failed"
+            ),
+        "svc.systemAudioReflection" to (
+            "反射注入系统内录 AudioRecord 失败" to
+                "Reflection injection of the system-audio AudioRecord failed"
+            ),
         // -------------------------------------------------- voice room (v0.8.0)
         "voice.title" to ("语音房" to "Voice room"),
         "voice.hint" to (
