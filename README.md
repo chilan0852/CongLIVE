@@ -122,6 +122,17 @@ APK 输出：`android/app/build/outputs/apk/debug/app-debug.apk`。App 内「我
 - HTTPS 域名部署后运行 `server/sync-turn-cert.sh`：从 Caddy 复制证书到 coturn，开启 **turns:域名:5349?transport=tcp**，并把 `TURN_TLS=1` 写入 `.env`。证书续期后需重新运行（或加入每日 cron）。
 - 云防火墙也需放行上述端口；`turn.runtime.conf`、`turn-certs/` 已被 `.gitignore` 排除。
 
+## 本地 LAN 模式
+
+没有公网服务器时，用 PC 做主机，手机连接同一 Wi-Fi：
+
+```bash
+bash local/start.sh       # macOS/Linux
+powershell -ExecutionPolicy Bypass -File local/start.ps1   # Windows
+```
+
+访问 `http://<PC-局域网IP>:8081`，视频/语音/弹幕均走本机 Docker 服务；详见 [local/README.md](local/README.md)。需要 Docker Desktop 或 Docker Engine。
+
 ## 配置
 
 主要环境变量见 `server/.env.example`、`backend/.env.example`。**不要提交 `.env`、`server/srs.runtime.conf`、证书私钥或录像文件**；这些已在 `.gitignore` 中排除。

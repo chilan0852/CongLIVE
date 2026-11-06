@@ -122,6 +122,17 @@ Plugins live in `backend/plugins/`, loaded by `backend/src/plugin-manager.js`. T
 - After HTTPS is issued, run `server/sync-turn-cert.sh` to copy Caddy's certificate into coturn and enable **turns:domain:5349?transport=tcp** (`TURN_TLS=1`). Re-run after certificate renewal, or add a daily cron.
 - Open the same ports in your cloud firewall. `turn.runtime.conf` and `turn-certs/` are gitignored.
 
+## Local LAN mode
+
+Run CongLive on a PC and connect phones over the same Wi-Fi:
+
+```bash
+bash local/start.sh       # macOS/Linux
+powershell -ExecutionPolicy Bypass -File local/start.ps1   # Windows
+```
+
+Open `http://<pc-lan-ip>:8081`; video, voice and chat use the local Docker stack. See [local/README.md](local/README.md). Docker Desktop or Docker Engine is required.
+
 ## Configuration
 
 See `server/.env.example` and `backend/.env.example`. **Never commit `.env`, `server/srs.runtime.conf`, private keys or recordings** — they are excluded by `.gitignore`.
