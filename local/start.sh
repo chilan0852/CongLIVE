@@ -22,7 +22,12 @@ LAN_IP="${LAN_IP:-127.0.0.1}"
 ENV_FILE=local/.env.local
 if [ ! -f "$ENV_FILE" ]; then
   echo "生成 $ENV_FILE …"
-  random() { node -e "process.stdout.write(require('crypto').randomBytes(24).toString('hex'))"; }
+  random() {
+    if command -v openssl >/dev/null 2>&1; then openssl rand -hex 24
+    elif command -v node >/dev/null 2>&1; then node -e "process.stdout.write(require('crypto').randomBytes(24).toString('hex'))"
+    else dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
+    fi
+  }
   cat > "$ENV_FILE" <<CFG
 PUBLIC_HOST=$LAN_IP
 CANDIDATE=$LAN_IP
